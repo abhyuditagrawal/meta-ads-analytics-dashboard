@@ -4,3 +4,4 @@ plotly
 openpyxl
 reportlab
 kaleido
+facebook-business
