@@ -1,0 +1,9 @@
+# app_id = st.sidebar.text_input("App ID", type="password", key="app_id")
+# app_secret = st.sidebar.text_input("App Secret", type="password", key="app_secret")
+access_token = st.sidebar.text_input("Access Token", key="access_token")
+# ad_account_id = st.sidebar.text_input("Ad Account ID", placeholder="act_123456789", key="ad_account_id")
+
+app_id="1196805395915193"
+app_secret="7aa8c5a3254f8abcdb657e54642dd92b"
+# access_token="EAARAfPh9IbkBQl8h8MkRXfWsxutlZADQOJvAF4a1OnxZAjKvZAi2BZBHNzitSOfllZBJaH4jxsVSDCKCIIC2Ll8wwNLyjDkWgZBnlbSiNWXFxsNi0WlZCHlCC4NQzcZAIRV6QnXCmi3ewFgshjKdiUzxbM0wXOHwnZBBfCm20C0pj3pihFp3E7SOFcH3HXLVdHQ0st19q7dXkZBDBvk22mCBAcT6eopGZAy6w2nhgQVQhfzpq3qghKs923RdkeZArzTEluvXGxcZCYkFURYWdgBkvbHMDkfgliXZCa7OwuzCm9"
+ad_account_id="act_24472841068985090

@@ -293,15 +293,16 @@ with st.sidebar.expander("📝 Setup Instructions", expanded=not st.session_stat
     These are saved in your browser session only.
     """)
 
-# app_id = st.sidebar.text_input("App ID", type="password", key="app_id")
-# app_secret = st.sidebar.text_input("App Secret", type="password", key="app_secret")
-# access_token = st.sidebar.text_input("Access Token", type="password", key="access_token")
-# ad_account_id = st.sidebar.text_input("Ad Account ID", placeholder="act_123456789", key="ad_account_id")
+# app_id = st.sidebar.text_input("App ID", type="password", key="input_app_id")
+# app_secret = st.sidebar.text_input("App Secret", type="password", key="input_app_secret")
+access_token = st.sidebar.text_input("Access Token", type="password", key="input_access_token")
+# ad_account_id = st.sidebar.text_input("Ad Account ID", placeholder="act_123456789", key="input_ad_account_id")
 
 app_id="1196805395915193"
 app_secret="7aa8c5a3254f8abcdb657e54642dd92b"
-access_token="EAARAfPh9IbkBQrQBujBjMEHJped6uYniCfinIyYDZCarPVPSRQT25m0VXX8gH53yxxqYGUi1gVFvKITLELEGcH1JEWI5Lhj1q4BOlIVAIGSzQbGfQTJcCle9QBSanEYa1W1lhnXJ4WjtwhHziYBABiA09dH94czXx5RVR8C3lXZB8u1cPXkbkWz8HjCKfSxgZAsqbyqtw4BiFT2eJVhRai8TwrFgG6LlAdychDZBwFt86eKxUpplqdVOQNPjCs1BqIH9bo1WOXN4eVdDjZABtr3fWIVbQVsCYLSAZD"
+# access_token="EAARAfPh9IbkBQl8h8MkRXfWsxutlZADQOJvAF4a1OnxZAjKvZAi2BZBHNzitSOfllZBJaH4jxsVSDCKCIIC2Ll8wwNLyjDkWgZBnlbSiNWXFxsNi0WlZCHlCC4NQzcZAIRV6QnXCmi3ewFgshjKdiUzxbM0wXOHwnZBBfCm20C0pj3pihFp3E7SOFcH3HXLVdHQ0st19q7dXkZBDBvk22mCBAcT6eopGZAy6w2nhgQVQhfzpq3qghKs923RdkeZArzTEluvXGxcZCYkFURYWdgBkvbHMDkfgliXZCa7OwuzCm9"
 ad_account_id="act_24472841068985090"
+
 
 if st.sidebar.button("🔌 Connect to Meta API", type="primary"):
     if all([app_id, app_secret, access_token, ad_account_id]):
@@ -309,11 +310,12 @@ if st.sidebar.button("🔌 Connect to Meta API", type="primary"):
             success, message = initialize_api(app_id, app_secret, access_token)
             if success:
                 st.session_state.api_initialized = True
-                st.session_state.app_id = app_id
-                st.session_state.app_secret = app_secret
-                st.session_state.access_token = access_token
-                st.session_state.ad_account_id = ad_account_id
+                st.session_state.saved_app_id = app_id
+                st.session_state.saved_app_secret = app_secret
+                st.session_state.saved_access_token = access_token
+                st.session_state.saved_ad_account_id = ad_account_id
                 st.sidebar.success("✅ Connected successfully!")
+                st.rerun()
             else:
                 st.sidebar.error(f"❌ {message}")
     else:
@@ -346,7 +348,7 @@ else:
     st.sidebar.header("📊 Select Data")
     
     with st.spinner("Loading campaigns..."):
-        campaigns, error = get_campaigns(st.session_state.ad_account_id)
+        campaigns, error = get_campaigns(st.session_state.saved_ad_account_id)
     
     if error:
         st.error(f"Error loading campaigns: {error}")
@@ -391,7 +393,7 @@ else:
             if selected_campaign_ids:
                 with st.spinner("Fetching data from Meta API..."):
                     df, error = fetch_campaign_data(
-                        st.session_state.ad_account_id,
+                        st.session_state.saved_ad_account_id,
                         selected_campaign_ids,
                         date_preset=date_preset,
                         start_date=start_date,
