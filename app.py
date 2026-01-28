@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.campaign import Campaign
-import json
 
 # Page config
 st.set_page_config(
@@ -17,7 +16,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Benchmark standards
+# Benchmark standards (with ROAS and ACoS added)
 BENCHMARKS = {
     'CTR': {'min': 0.9, 'ideal': 1.5, 'max': 3.0, 'unit': '%'},
     'LP_View_Rate': {'min': 80, 'ideal': 90, 'max': 100, 'unit': '%'},
@@ -27,8 +26,13 @@ BENCHMARKS = {
     'Overall_CVR': {'min': 2, 'ideal': 5, 'max': 10, 'unit': '%'},
     'CPC': {'min': 5, 'ideal': 10, 'max': 15, 'unit': '₹'},
     'CPA': {'min': 100, 'ideal': 300, 'max': 500, 'unit': '₹'},
-    'Frequency': {'min': 1.0, 'ideal': 1.1, 'max': 1.3, 'unit': 'x'}
+    'Frequency': {'min': 1.0, 'ideal': 1.1, 'max': 1.3, 'unit': 'x'},
+    'ROAS': {'min': 2.0, 'ideal': 4.0, 'max': 6.0, 'unit': 'x'},
+    'ACoS': {'min': 40, 'ideal': 25, 'max': 15, 'unit': '%'}
 }
+
+# Average Order Value (configurable)
+AOV = 600  # ₹600 per order
 
 # Initialize session state
 if 'api_initialized' not in st.session_state:
@@ -122,8 +126,10 @@ def fetch_campaign_data(ad_account_id, campaign_ids, date_preset='last_30d', sta
                 'adds_to_cart': 0,
                 'checkouts': 0,
                 'purchases': 0,
+                'revenue': 0,
             }
             
+            # Extract actions
             actions = insight.get('actions', [])
             for action in actions:
                 action_type = action.get('action_type')
@@ -138,6 +144,20 @@ def fetch_campaign_data(ad_account_id, campaign_ids, date_preset='last_30d', sta
                 elif 'purchase' in action_type or action_type == 'offsite_conversion.fb_pixel_purchase':
                     row['purchases'] = value
             
+            # Try to get actual revenue from action_values
+            action_values = insight.get('action_values', [])
+            revenue_found = False
+            for action_value in action_values:
+                action_type = action_value.get('action_type')
+                if 'purchase' in action_type or action_type == 'offsite_conversion.fb_pixel_purchase':
+                    row['revenue'] = float(action_value.get('value', 0))
+                    revenue_found = True
+                    break
+            
+            # Fallback to AOV calculation if no revenue found
+            if not revenue_found and row['purchases'] > 0:
+                row['revenue'] = row['purchases'] * AOV
+            
             data_list.append(row)
         
         if data_list:
@@ -150,11 +170,15 @@ def fetch_campaign_data(ad_account_id, campaign_ids, date_preset='last_30d', sta
         return None, str(e)
 
 def calculate_metrics(df: pd.DataFrame) -> Dict:
-    """Calculate all marketing metrics"""
+    """Calculate all marketing metrics including ROAS and ACoS"""
     totals = df.sum(numeric_only=True)
     
     def pct(a, b):
         return (a / b * 100) if b > 0 else 0
+    
+    # Calculate ROAS and ACoS
+    roas = (totals.revenue / totals.spend) if totals.spend > 0 else 0
+    acos = (totals.spend / totals.revenue * 100) if totals.revenue > 0 else 0
     
     metrics = {
         'CTR': pct(totals.clicks, totals.impressions),
@@ -165,7 +189,8 @@ def calculate_metrics(df: pd.DataFrame) -> Dict:
         'Overall_CVR': pct(totals.purchases, totals.clicks),
         'CPC': totals.spend / totals.clicks if totals.clicks > 0 else 0,
         'CPA': totals.spend / totals.purchases if totals.purchases > 0 else 0,
-        'ROAS': (totals.purchases * 500) / totals.spend if totals.spend > 0 else 0,
+        'ROAS': roas,
+        'ACoS': acos,
         'Frequency': totals.frequency / len(df) if len(df) > 0 else 0,
         'totals': {
             'impressions': totals.impressions,
@@ -174,11 +199,30 @@ def calculate_metrics(df: pd.DataFrame) -> Dict:
             'adds_to_cart': totals.adds_to_cart,
             'checkouts': totals.checkouts,
             'purchases': totals.purchases,
-            'spend': totals.spend
+            'spend': totals.spend,
+            'revenue': totals.revenue
         }
     }
     
     return metrics
+
+def calculate_daily_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate metrics for each day"""
+    daily = df.copy()
+    
+    daily['CTR'] = (daily['clicks'] / daily['impressions'] * 100).fillna(0)
+    daily['LP_View_Rate'] = (daily['lp_views'] / daily['clicks'] * 100).fillna(0)
+    daily['ATC_Rate'] = (daily['adds_to_cart'] / daily['lp_views'] * 100).fillna(0)
+    daily['Checkout_Rate'] = (daily['checkouts'] / daily['adds_to_cart'] * 100).fillna(0)
+    daily['Purchase_Rate'] = (daily['purchases'] / daily['checkouts'] * 100).fillna(0)
+    daily['Overall_CVR'] = (daily['purchases'] / daily['clicks'] * 100).fillna(0)
+    daily['CPC'] = (daily['spend'] / daily['clicks']).fillna(0)
+    daily['CPA'] = (daily['spend'] / daily['purchases']).fillna(0).replace([float('inf')], 0)
+    daily['ROAS'] = (daily['revenue'] / daily['spend']).fillna(0).replace([float('inf')], 0)
+    daily['ACoS'] = (daily['spend'] / daily['revenue'] * 100).fillna(0).replace([float('inf')], 0)
+    daily['Frequency'] = (daily['impressions'] / daily['clicks']).fillna(0)
+    
+    return daily
 
 def get_status_emoji(metric_name: str, value: float) -> str:
     """Get emoji for status"""
@@ -186,12 +230,22 @@ def get_status_emoji(metric_name: str, value: float) -> str:
         return '⚪'
     
     bench = BENCHMARKS[metric_name]
-    if value >= bench['ideal']:
-        return '✅'
-    elif value >= bench['min']:
-        return '⚠️'
+    
+    # For ACoS, lower is better
+    if metric_name == 'ACoS':
+        if value <= bench['max']:
+            return '✅'
+        elif value <= bench['ideal']:
+            return '⚠️'
+        else:
+            return '🚨'
     else:
-        return '🚨'
+        if value >= bench['ideal']:
+            return '✅'
+        elif value >= bench['min']:
+            return '⚠️'
+        else:
+            return '🚨'
 
 def create_funnel_chart(metrics: Dict) -> go.Figure:
     """Create funnel visualization"""
@@ -224,6 +278,100 @@ def create_funnel_chart(metrics: Dict) -> go.Figure:
     
     return fig
 
+def create_actual_vs_ideal_chart(df: pd.DataFrame, metric: str) -> go.Figure:
+    """Create chart showing actual vs ideal performance over time"""
+    daily = calculate_daily_metrics(df)
+    
+    bench = BENCHMARKS.get(metric)
+    if not bench:
+        return None
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=daily['date'],
+        y=daily[metric],
+        mode='lines+markers',
+        name='Actual',
+        line=dict(color='#3b82f6', width=3),
+        marker=dict(size=8)
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=daily['date'],
+        y=[bench['ideal']] * len(daily),
+        mode='lines',
+        name='Ideal Target',
+        line=dict(color='#10b981', width=2, dash='dash')
+    ))
+    
+    fig.add_trace(go.Scatter(
+        x=daily['date'],
+        y=[bench['min']] * len(daily),
+        mode='lines',
+        name='Minimum Acceptable',
+        line=dict(color='#f59e0b', width=2, dash='dot')
+    ))
+    
+    fig.update_layout(
+        title=f"{metric.replace('_', ' ')} - Actual vs Benchmarks",
+        xaxis_title="Date",
+        yaxis_title=f"Value ({bench['unit']})",
+        hovermode='x unified',
+        showlegend=True,
+        height=400
+    )
+    
+    return fig
+
+def create_performance_gauge(actual: float, metric: str) -> go.Figure:
+    """Create a gauge chart for a metric"""
+    bench = BENCHMARKS.get(metric)
+    if not bench:
+        return None
+    
+    # For ACoS, lower is better, so reverse the color logic
+    if metric == 'ACoS':
+        if actual <= bench['max']:
+            color = '#10b981'
+        elif actual <= bench['ideal']:
+            color = '#f59e0b'
+        else:
+            color = '#ef4444'
+    else:
+        if actual >= bench['ideal']:
+            color = '#10b981'
+        elif actual >= bench['min']:
+            color = '#f59e0b'
+        else:
+            color = '#ef4444'
+    
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=actual,
+        domain={'x': [0, 1], 'y': [0, 1]},
+        title={'text': metric.replace('_', ' ')},
+        delta={'reference': bench['ideal'], 'increasing': {'color': "green" if metric != 'ACoS' else "red"}},
+        gauge={
+            'axis': {'range': [None, bench['max'] if metric != 'ACoS' else bench['min']]},
+            'bar': {'color': color},
+            'steps': [
+                {'range': [0, bench['min'] if metric != 'ACoS' else bench['max']], 'color': '#fee2e2'},
+                {'range': [bench['min'] if metric != 'ACoS' else bench['ideal'], bench['ideal'] if metric != 'ACoS' else bench['min']], 'color': '#fef3c7'},
+                {'range': [bench['ideal'] if metric != 'ACoS' else 0, bench['max'] if metric != 'ACoS' else bench['ideal']], 'color': '#dcfce7'}
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': bench['ideal']
+            }
+        }
+    ))
+    
+    fig.update_layout(height=250, margin=dict(l=20, r=20, t=40, b=20))
+    
+    return fig
+
 def get_recommendations(metrics: Dict) -> List[Dict]:
     """Generate recommendations based on metrics"""
     issues = []
@@ -239,6 +387,7 @@ def get_recommendations(metrics: Dict) -> List[Dict]:
                 'Add multiple payment options (UPI, COD, Cards)',
                 'Display shipping costs earlier in the funnel',
                 'Simplify checkout to 1-2 steps maximum',
+                'Add trust badges and security indicators',
             ]
         })
     
@@ -252,6 +401,7 @@ def get_recommendations(metrics: Dict) -> List[Dict]:
                 'Improve page load speed (compress images, use CDN)',
                 'Optimize for mobile devices',
                 'Check for broken links or redirects',
+                'Ensure landing page matches ad promise',
             ]
         })
     
@@ -265,6 +415,37 @@ def get_recommendations(metrics: Dict) -> List[Dict]:
                 'Test different ad creatives and copy',
                 'Improve ad targeting to reach more relevant audience',
                 'Use more compelling calls-to-action',
+                'A/B test different images and videos',
+            ]
+        })
+    
+    if metrics['ROAS'] < BENCHMARKS['ROAS']['min']:
+        issues.append({
+            'priority': 'CRITICAL',
+            'metric': 'ROAS (Return on Ad Spend)',
+            'current': metrics['ROAS'],
+            'target': BENCHMARKS['ROAS']['ideal'],
+            'recommendations': [
+                'Increase product prices or average order value',
+                'Improve conversion rate throughout funnel',
+                'Reduce ad spend on underperforming campaigns',
+                'Focus on high-value customer segments',
+                'Optimize product mix for profitability',
+            ]
+        })
+    
+    if metrics['ACoS'] > BENCHMARKS['ACoS']['ideal']:
+        issues.append({
+            'priority': 'HIGH',
+            'metric': 'ACoS (Advertising Cost of Sales)',
+            'current': metrics['ACoS'],
+            'target': BENCHMARKS['ACoS']['ideal'],
+            'recommendations': [
+                'Reduce cost per click through better targeting',
+                'Improve conversion rate to lower CPA',
+                'Pause underperforming ad sets',
+                'Focus on audiences with lower CPAs',
+                'Optimize bidding strategy',
             ]
         })
     
@@ -273,10 +454,221 @@ def get_recommendations(metrics: Dict) -> List[Dict]:
     
     return issues
 
+def generate_pdf_report(product_name: str, df: pd.DataFrame, metrics: Dict) -> bytes:
+    """Generate a comprehensive PDF report"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_CENTER
+        import plotly.io as pio
+        
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+        story = []
+        styles = getSampleStyleSheet()
+        
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=colors.HexColor('#1f2937'),
+            spaceAfter=30,
+            alignment=TA_CENTER,
+            fontName='Helvetica-Bold'
+        )
+        
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=16,
+            textColor=colors.HexColor('#3b82f6'),
+            spaceAfter=12,
+            spaceBefore=12,
+            fontName='Helvetica-Bold'
+        )
+        
+        subheading_style = ParagraphStyle(
+            'CustomSubHeading',
+            parent=styles['Heading3'],
+            fontSize=12,
+            textColor=colors.HexColor('#6b7280'),
+            spaceAfter=8,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Title
+        story.append(Paragraph("Meta Ads Analytics Report", title_style))
+        story.append(Paragraph(f"Campaign: {product_name}", heading_style))
+        story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", styles['Normal']))
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Executive Summary
+        story.append(Paragraph("Executive Summary", heading_style))
+        num_days = len(df['date'].unique())
+        summary_data = [
+            ['Metric', 'Value'],
+            ['Total Spend', f"₹{metrics['totals']['spend']:,.0f}"],
+            ['Total Revenue', f"₹{metrics['totals']['revenue']:,.0f}"],
+            ['Total Purchases', f"{int(metrics['totals']['purchases'])}"],
+            ['Cost Per Acquisition', f"₹{metrics['CPA']:.2f}"],
+            ['ROAS', f"{metrics['ROAS']:.2f}x"],
+            ['ACoS', f"{metrics['ACoS']:.2f}%"],
+            ['Overall Conversion Rate', f"{metrics['Overall_CVR']:.2f}%"],
+            ['Days Analyzed', f"{num_days}"]
+        ]
+        
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3b82f6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('TOPPADDING', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+        ]))
+        
+        story.append(summary_table)
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Performance Metrics
+        story.append(Paragraph("Performance Metrics", heading_style))
+        
+        metrics_data = [
+            ['Metric', 'Value', 'Target', 'Status'],
+            ['CTR', f"{metrics['CTR']:.2f}%", f"{BENCHMARKS['CTR']['ideal']}%", get_status_emoji('CTR', metrics['CTR'])],
+            ['LP View Rate', f"{metrics['LP_View_Rate']:.2f}%", f"{BENCHMARKS['LP_View_Rate']['ideal']}%", get_status_emoji('LP_View_Rate', metrics['LP_View_Rate'])],
+            ['Add to Cart Rate', f"{metrics['ATC_Rate']:.2f}%", f"{BENCHMARKS['ATC_Rate']['ideal']}%", get_status_emoji('ATC_Rate', metrics['ATC_Rate'])],
+            ['Checkout Rate', f"{metrics['Checkout_Rate']:.2f}%", f"{BENCHMARKS['Checkout_Rate']['ideal']}%", get_status_emoji('Checkout_Rate', metrics['Checkout_Rate'])],
+            ['Purchase Rate', f"{metrics['Purchase_Rate']:.2f}%", f"{BENCHMARKS['Purchase_Rate']['ideal']}%", get_status_emoji('Purchase_Rate', metrics['Purchase_Rate'])],
+            ['ROAS', f"{metrics['ROAS']:.2f}x", f"{BENCHMARKS['ROAS']['ideal']}x", get_status_emoji('ROAS', metrics['ROAS'])],
+            ['ACoS', f"{metrics['ACoS']:.2f}%", f"{BENCHMARKS['ACoS']['ideal']}%", get_status_emoji('ACoS', metrics['ACoS'])],
+        ]
+        
+        metrics_table = Table(metrics_data, colWidths=[2*inch, 1.5*inch, 1.5*inch, 1*inch])
+        metrics_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10b981')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('TOPPADDING', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+        ]))
+        
+        story.append(metrics_table)
+        story.append(PageBreak())
+        
+        # Funnel Chart
+        story.append(Paragraph("Conversion Funnel Visualization", heading_style))
+        funnel_fig = create_funnel_chart(metrics)
+        img_bytes = pio.to_image(funnel_fig, format='png', width=700, height=500)
+        img_buffer = BytesIO(img_bytes)
+        img = Image(img_buffer, width=6*inch, height=4*inch)
+        story.append(img)
+        story.append(Spacer(1, 0.3*inch))
+        
+        # Daily Trends
+        story.append(Paragraph("Daily Performance Trends", heading_style))
+        
+        fig_conversions = px.line(
+            df, 
+            x="date", 
+            y=["clicks", "adds_to_cart", "purchases"],
+            title="Daily Conversions Trend",
+            labels={"value": "Count", "variable": "Metric", "date": "Date"}
+        )
+        fig_conversions.update_layout(width=700, height=400, showlegend=True)
+        
+        conv_img_bytes = pio.to_image(fig_conversions, format='png', width=700, height=400)
+        conv_img_buffer = BytesIO(conv_img_bytes)
+        conv_img = Image(conv_img_buffer, width=6*inch, height=3*inch)
+        story.append(conv_img)
+        story.append(PageBreak())
+        
+        # Day-wise Performance Table
+        story.append(Paragraph("Day-wise Performance Breakdown", heading_style))
+        
+        daily_metrics = calculate_daily_metrics(df)
+        daily_data = [['Date', 'CTR%', 'LP%', 'ATC%', 'Chk%', 'Pur%', 'CVR%', 'ROAS', 'ACoS%']]
+        
+        for _, row in daily_metrics.iterrows():
+            daily_data.append([
+                row['date'].strftime('%m/%d'),
+                f"{row['CTR']:.1f}",
+                f"{row['LP_View_Rate']:.1f}",
+                f"{row['ATC_Rate']:.1f}",
+                f"{row['Checkout_Rate']:.1f}",
+                f"{row['Purchase_Rate']:.1f}",
+                f"{row['Overall_CVR']:.1f}",
+                f"{row['ROAS']:.2f}",
+                f"{row['ACoS']:.1f}"
+            ])
+        
+        daily_table = Table(daily_data, colWidths=[0.7*inch] * 9)
+        daily_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3b82f6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 7),
+            ('TOPPADDING', (0, 1), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+        ]))
+        
+        story.append(daily_table)
+        story.append(PageBreak())
+        
+        # Recommendations
+        recommendations = get_recommendations(metrics)
+        if recommendations:
+            story.append(Paragraph("Issues Detected & Recommendations", heading_style))
+            
+            for issue in recommendations:
+                priority_color = '#ef4444' if issue['priority'] == 'CRITICAL' else '#f97316' if issue['priority'] == 'HIGH' else '#f59e0b'
+                
+                story.append(Paragraph(f"<font color='{priority_color}'><b>{issue['priority']}: {issue['metric']}</b></font>", subheading_style))
+                story.append(Paragraph(f"Current: {issue['current']:.2f} | Target: {issue['target']:.2f}", styles['Normal']))
+                story.append(Spacer(1, 0.1*inch))
+                
+                for rec in issue['recommendations']:
+                    story.append(Paragraph(f"• {rec}", styles['Normal']))
+                
+                story.append(Spacer(1, 0.2*inch))
+        
+        doc.build(story)
+        buffer.seek(0)
+        return buffer.getvalue()
+    
+    except ImportError:
+        st.error("PDF generation requires reportlab and kaleido. Install with: pip install reportlab kaleido")
+        return None
+    except Exception as e:
+        st.error(f"Error generating PDF: {str(e)}")
+        return None
+
 # ==================== MAIN APP ====================
 
 st.title("📊 Meta Ads Live Analytics Dashboard")
-st.markdown("**Real-time data from Meta Ads Manager API**")
+st.markdown("**Real-time data from Meta Ads Manager API with Advanced Analytics**")
 
 # Sidebar - API Configuration
 st.sidebar.header("🔑 API Configuration")
@@ -293,16 +685,12 @@ with st.sidebar.expander("📝 Setup Instructions", expanded=not st.session_stat
     These are saved in your browser session only.
     """)
 
-# app_id = st.sidebar.text_input("App ID", type="password", key="input_app_id")
-# app_secret = st.sidebar.text_input("App Secret", type="password", key="input_app_secret")
 access_token = st.sidebar.text_input("Access Token", type="password", key="input_access_token")
-# ad_account_id = st.sidebar.text_input("Ad Account ID", placeholder="act_123456789", key="input_ad_account_id")
 
-app_id="1196805395915193"
-app_secret="7aa8c5a3254f8abcdb657e54642dd92b"
-# access_token="EAARAfPh9IbkBQl8h8MkRXfWsxutlZADQOJvAF4a1OnxZAjKvZAi2BZBHNzitSOfllZBJaH4jxsVSDCKCIIC2Ll8wwNLyjDkWgZBnlbSiNWXFxsNi0WlZCHlCC4NQzcZAIRV6QnXCmi3ewFgshjKdiUzxbM0wXOHwnZBBfCm20C0pj3pihFp3E7SOFcH3HXLVdHQ0st19q7dXkZBDBvk22mCBAcT6eopGZAy6w2nhgQVQhfzpq3qghKs923RdkeZArzTEluvXGxcZCYkFURYWdgBkvbHMDkfgliXZCa7OwuzCm9"
-ad_account_id="act_24472841068985090"
-
+# Hardcoded credentials (can be made configurable)
+app_id = "1196805395915193"
+app_secret = "7aa8c5a3254f8abcdb657e54642dd92b"
+ad_account_id = "act_24472841068985090"
 
 if st.sidebar.button("🔌 Connect to Meta API", type="primary"):
     if all([app_id, app_secret, access_token, ad_account_id]):
@@ -337,9 +725,12 @@ if not st.session_state.api_initialized:
     
     **What you'll get:**
     - ✅ Real-time campaign performance data
+    - ✅ **ROAS & ACoS tracking**
+    - ✅ **All Campaigns combined view**
+    - ✅ Comprehensive visualizations (gauges, trends, benchmarks)
+    - ✅ **Day-wise performance breakdown**
+    - ✅ **PDF report generation**
     - ✅ Automated insights and recommendations
-    - ✅ Conversion funnel analysis
-    - ✅ Benchmark comparisons
     - ✅ No manual Excel uploads needed!
     """)
     
@@ -353,39 +744,115 @@ else:
     if error:
         st.error(f"Error loading campaigns: {error}")
     elif campaigns:
-        # Campaign selector
-        campaign_options = {f"{c['name']} ({c['status']})": c['id'] for c in campaigns}
+        # Separate campaigns by status
+        active_campaigns = [c for c in campaigns if c['status'] == 'ACTIVE']
+        paused_campaigns = [c for c in campaigns if c['status'] == 'PAUSED']
+        archived_campaigns = [c for c in campaigns if c['status'] == 'ARCHIVED']
+        
+        st.sidebar.markdown("### 🎯 Campaign Selection")
+        
+        # Quick select options
+        st.sidebar.markdown("**Quick Select:**")
+        col1, col2 = st.sidebar.columns(2)
+        
+        with col1:
+            select_all_active = st.sidebar.button("✅ All Active", use_container_width=True)
+        with col2:
+            clear_selection = st.sidebar.button("❌ Clear All", use_container_width=True)
+        
+        st.sidebar.markdown("---")
+        
+        # Show campaign counts
+        st.sidebar.markdown(f"""
+        **Campaign Summary:**
+        - 🟢 Active: {len(active_campaigns)}
+        - 🟡 Paused: {len(paused_campaigns)}
+        - 🔴 Archived: {len(archived_campaigns)}
+        """)
+        
+        st.sidebar.markdown("---")
+        
+        # Build campaign options with emojis
+        campaign_options = {}
+        
+        # Active campaigns with green indicator
+        if active_campaigns:
+            st.sidebar.markdown("**🟢 Active Campaigns:**")
+            for c in active_campaigns:
+                display_name = f"🟢 {c['name']}"
+                campaign_options[display_name] = c['id']
+        
+        # Paused campaigns with yellow indicator
+        if paused_campaigns:
+            st.sidebar.markdown("**🟡 Paused Campaigns:**")
+            for c in paused_campaigns:
+                display_name = f"🟡 {c['name']}"
+                campaign_options[display_name] = c['id']
+        
+        # Archived campaigns with red indicator (collapsed by default)
+        if archived_campaigns:
+            with st.sidebar.expander("🔴 Archived Campaigns (Click to expand)", expanded=False):
+                for c in archived_campaigns:
+                    display_name = f"🔴 {c['name']}"
+                    campaign_options[display_name] = c['id']
+        
+        # Initialize default selection
+        default_selection = []
+        
+        # Handle quick select buttons
+        if select_all_active:
+            default_selection = [f"🟢 {c['name']}" for c in active_campaigns]
+        elif clear_selection:
+            default_selection = []
+        elif 'selected_campaign_names' in st.session_state:
+            default_selection = st.session_state.selected_campaign_names
+        
+        # Campaign multiselect
         selected_campaign_names = st.sidebar.multiselect(
-            "Select Campaigns",
+            "Select Campaigns to Analyze:",
             options=list(campaign_options.keys()),
-            default=[list(campaign_options.keys())[0]] if campaign_options else []
+            default=default_selection,
+            help="Select one or more campaigns. Use 'All Active' button for quick selection.",
+            key=f"campaign_selector_{select_all_active}_{clear_selection}"
         )
+        
+        # Update session state
+        st.session_state.selected_campaign_names = selected_campaign_names
         
         selected_campaign_ids = [campaign_options[name] for name in selected_campaign_names]
         
-        # Date range selector
+        # Show selected count
+        if selected_campaign_names:
+            st.sidebar.success(f"✅ {len(selected_campaign_names)} campaign(s) selected")
+        
+        # Date range selector with Today and Yesterday options
         date_option = st.sidebar.radio(
             "Date Range",
-            ["Last 7 Days", "Last 30 Days", "This Month", "Custom Range"]
+            ["Today", "Yesterday", "Last 7 Days", "Last 30 Days", "This Month", "Custom Range"]
         )
-        
-        date_preset_map = {
-            "Last 7 Days": "last_7d",
-            "Last 30 Days": "last_30d",
-            "This Month": "this_month",
-        }
         
         start_date = None
         end_date = None
         date_preset = None
         
-        if date_option == "Custom Range":
+        if date_option == "Today":
+            start_date = datetime.now().date()
+            end_date = datetime.now().date()
+        elif date_option == "Yesterday":
+            start_date = (datetime.now() - timedelta(days=1)).date()
+            end_date = (datetime.now() - timedelta(days=1)).date()
+        elif date_option == "Custom Range":
             col1, col2 = st.sidebar.columns(2)
             with col1:
                 start_date = st.date_input("Start Date", datetime.now() - timedelta(days=30))
             with col2:
                 end_date = st.date_input("End Date", datetime.now())
         else:
+            date_preset_map = {
+                "Last 7 Days": "last_7d",
+                "Last 30 Days": "last_30d",
+                "This Month": "this_month",
+            }
             date_preset = date_preset_map[date_option]
         
         # Fetch data button
@@ -405,7 +872,9 @@ else:
                     elif df is not None and len(df) > 0:
                         st.session_state.df = df
                         st.session_state.data_loaded = True
-                        st.success(f"✅ Loaded {len(df)} days of data!")
+                        num_campaigns = len(df['product'].unique())
+                        num_days = len(df['date'].unique())
+                        st.success(f"✅ Loaded {num_days} days of data for {num_campaigns} campaign(s)!")
                     else:
                         st.warning("No data found for selected campaigns and date range")
             else:
@@ -415,16 +884,41 @@ else:
         if st.session_state.data_loaded and 'df' in st.session_state:
             df = st.session_state.df
             
-            # If multiple campaigns, show selector
-            if len(df['product'].unique()) > 1:
-                st.sidebar.markdown("---")
-                view_mode = st.sidebar.radio("View Mode", ["Single Campaign", "Compare Campaigns"])
+            # Add "All Campaigns Combined" option
+            st.sidebar.markdown("---")
+            
+            unique_campaigns = df['product'].unique()
+            
+            if len(unique_campaigns) > 1:
+                view_mode = st.sidebar.radio(
+                    "View Mode:",
+                    ["All Campaigns Combined", "Individual Campaign"],
+                    help="Choose to view all campaigns together or analyze them individually"
+                )
                 
-                if view_mode == "Single Campaign":
-                    selected_product = st.sidebar.selectbox("Select Campaign", df['product'].unique())
-                    df_filtered = df[df['product'] == selected_product]
+                if view_mode == "All Campaigns Combined":
+                    # Aggregate data across all campaigns by date
+                    df_filtered = df.groupby('date', as_index=False).agg({
+                        'impressions': 'sum',
+                        'clicks': 'sum',
+                        'spend': 'sum',
+                        'reach': 'sum',
+                        'frequency': 'mean',
+                        'lp_views': 'sum',
+                        'adds_to_cart': 'sum',
+                        'checkouts': 'sum',
+                        'purchases': 'sum',
+                        'revenue': 'sum'
+                    })
+                    df_filtered['product'] = 'All Campaigns Combined'
+                    selected_product = "All Campaigns Combined"
                 else:
-                    df_filtered = df
+                    selected_product = st.sidebar.selectbox(
+                        "Select Campaign:", 
+                        unique_campaigns,
+                        help="Choose a specific campaign to analyze"
+                    )
+                    df_filtered = df[df['product'] == selected_product]
             else:
                 df_filtered = df
                 selected_product = df['product'].iloc[0]
@@ -433,23 +927,34 @@ else:
             metrics = calculate_metrics(df_filtered)
             
             # Display header
-            col1, col2, col3 = st.columns([2, 1, 1])
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
             with col1:
-                if len(df['product'].unique()) == 1:
-                    st.header(f"📦 {selected_product}")
+                st.header(f"📦 {selected_product}")
             with col2:
-                st.metric("Days of Data", len(df_filtered))
+                num_days = len(df_filtered['date'].unique())
+                st.metric("Days of Data", num_days)
             with col3:
                 st.metric("Total Spend", f"₹{metrics['totals']['spend']:,.0f}")
+            with col4:
+                # PDF Download button
+                pdf_bytes = generate_pdf_report(selected_product, df_filtered, metrics)
+                if pdf_bytes:
+                    st.download_button(
+                        label="📥 PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"{selected_product.replace(' ', '_')}_Report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
             
             st.divider()
             
             # Performance Overview
             st.subheader("🎯 Performance Overview")
             
-            metric_cols = st.columns(6)
-            metric_names = ['CTR', 'LP_View_Rate', 'ATC_Rate', 'Checkout_Rate', 'Purchase_Rate', 'Overall_CVR']
-            metric_labels = ['CTR', 'LP View Rate', 'ATC Rate', 'Checkout Rate', 'Purchase Rate', 'Overall CVR']
+            metric_cols = st.columns(8)
+            metric_names = ['CTR', 'LP_View_Rate', 'ATC_Rate', 'Checkout_Rate', 'Purchase_Rate', 'Overall_CVR', 'ROAS', 'ACoS']
+            metric_labels = ['CTR', 'LP View', 'ATC', 'Checkout', 'Purchase', 'CVR', 'ROAS', 'ACoS']
             
             for idx, (metric_name, label) in enumerate(zip(metric_names, metric_labels)):
                 with metric_cols[idx]:
@@ -457,12 +962,26 @@ else:
                     emoji = get_status_emoji(metric_name, value)
                     ideal = BENCHMARKS[metric_name]['ideal']
                     delta_val = value - ideal
+                    unit = BENCHMARKS[metric_name]['unit']
                     
-                    st.metric(
-                        label=f"{emoji} {label}",
-                        value=f"{value:.2f}%",
-                        delta=f"{delta_val:+.2f}% vs target"
-                    )
+                    if metric_name == 'ROAS':
+                        st.metric(
+                            label=f"{emoji} {label}",
+                            value=f"{value:.2f}{unit}",
+                            delta=f"{delta_val:+.2f}{unit}"
+                        )
+                    elif metric_name == 'ACoS':
+                        st.metric(
+                            label=f"{emoji} {label}",
+                            value=f"{value:.1f}{unit}",
+                            delta=f"{-delta_val:+.1f}{unit}"  # Inverted for ACoS
+                        )
+                    else:
+                        st.metric(
+                            label=f"{emoji} {label}",
+                            value=f"{value:.1f}{unit}",
+                            delta=f"{delta_val:+.1f}{unit}"
+                        )
             
             st.divider()
             
@@ -470,7 +989,7 @@ else:
             st.subheader("📊 Performance vs Benchmarks")
             
             comparison_data = []
-            for metric_name in ['CTR', 'LP_View_Rate', 'ATC_Rate', 'Checkout_Rate', 'Purchase_Rate', 'Overall_CVR', 'CPC', 'CPA', 'Frequency']:
+            for metric_name in ['CTR', 'LP_View_Rate', 'ATC_Rate', 'Checkout_Rate', 'Purchase_Rate', 'Overall_CVR', 'CPC', 'CPA', 'ROAS', 'ACoS', 'Frequency']:
                 actual_val = metrics[metric_name]
                 bench = BENCHMARKS[metric_name]
                 
@@ -491,6 +1010,65 @@ else:
             
             st.divider()
             
+            # Performance Gauges
+            st.subheader("🎯 Performance Gauges")
+            
+            gauge_cols = st.columns(4)
+            key_metrics_for_gauge = ['CTR', 'Checkout_Rate', 'Overall_CVR', 'ROAS']
+            
+            for idx, metric_name in enumerate(key_metrics_for_gauge):
+                with gauge_cols[idx]:
+                    gauge_fig = create_performance_gauge(metrics[metric_name], metric_name)
+                    if gauge_fig:
+                        st.plotly_chart(gauge_fig, use_container_width=True)
+            
+            st.divider()
+            
+            # Daily Performance vs Benchmarks
+            st.subheader("📈 Daily Performance vs Benchmarks")
+            
+            chart_col1, chart_col2 = st.columns(2)
+            
+            with chart_col1:
+                ctr_chart = create_actual_vs_ideal_chart(df_filtered, 'CTR')
+                if ctr_chart:
+                    st.plotly_chart(ctr_chart, use_container_width=True)
+                
+                atc_chart = create_actual_vs_ideal_chart(df_filtered, 'ATC_Rate')
+                if atc_chart:
+                    st.plotly_chart(atc_chart, use_container_width=True)
+                
+                roas_chart = create_actual_vs_ideal_chart(df_filtered, 'ROAS')
+                if roas_chart:
+                    st.plotly_chart(roas_chart, use_container_width=True)
+            
+            with chart_col2:
+                checkout_chart = create_actual_vs_ideal_chart(df_filtered, 'Checkout_Rate')
+                if checkout_chart:
+                    st.plotly_chart(checkout_chart, use_container_width=True)
+                
+                cvr_chart = create_actual_vs_ideal_chart(df_filtered, 'Overall_CVR')
+                if cvr_chart:
+                    st.plotly_chart(cvr_chart, use_container_width=True)
+            
+            st.divider()
+            
+            # Day-wise Performance Breakdown
+            st.subheader("📅 Day-wise Performance Breakdown")
+            
+            daily_metrics = calculate_daily_metrics(df_filtered)
+            display_cols = ['date', 'CTR', 'LP_View_Rate', 'ATC_Rate', 'Checkout_Rate', 'Purchase_Rate', 'Overall_CVR', 'CPC', 'CPA', 'ROAS', 'ACoS', 'Frequency']
+            daily_display = daily_metrics[display_cols].copy()
+            daily_display['date'] = pd.to_datetime(daily_display['date']).dt.strftime('%Y-%m-%d')
+            
+            for col in display_cols[1:]:
+                daily_display[col] = daily_display[col].round(2)
+            
+            st.dataframe(daily_display, use_container_width=True, hide_index=True)
+            st.info("💡 **Color Guide:** ✅ Excellent (above ideal) | ⚠️ Average (above minimum) | 🚨 Poor (below minimum)")
+            
+            st.divider()
+            
             # Charts
             col1, col2 = st.columns(2)
             
@@ -500,7 +1078,7 @@ else:
                 st.plotly_chart(fig_funnel, use_container_width=True)
             
             with col2:
-                st.subheader("💰 Cost Metrics")
+                st.subheader("💰 Cost & Revenue Metrics")
                 
                 st.markdown(f"""
                 <div style='padding: 15px; background-color: #eff6ff; border-left: 4px solid #3b82f6; margin-bottom: 15px;'>
@@ -508,21 +1086,27 @@ else:
                     <div style='font-size: 28px; font-weight: bold; color: #000000;'>₹{metrics['totals']['spend']:,.0f}</div>
                 </div>
                 
-                <div style='padding: 15px; background-color: #f3e8ff; border-left: 4px solid #a855f7; margin-bottom: 15px;'>
-                    <div style='color: #1f2937; font-size: 14px;'>Cost Per Click (CPC)</div>
-                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>₹{metrics['CPC']:.2f}</div>
-                    <div style='color: #1f2937; font-size: 12px;'>Benchmark: ₹5-15</div>
+                <div style='padding: 15px; background-color: #dcfce7; border-left: 4px solid #22c55e; margin-bottom: 15px;'>
+                    <div style='color: #1f2937; font-size: 14px;'>Total Revenue</div>
+                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>₹{metrics['totals']['revenue']:,.0f}</div>
                 </div>
                 
-                <div style='padding: 15px; background-color: #dcfce7; border-left: 4px solid #22c55e; margin-bottom: 15px;'>
-                    <div style='color: #1f2937; font-size: 14px;'>Cost Per Acquisition (CPA)</div>
-                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>₹{metrics['CPA']:.2f}</div>
-                    <div style='color: #1f2937; font-size: 12px;'>Benchmark: ₹100-500</div>
+                <div style='padding: 15px; background-color: #f3e8ff; border-left: 4px solid #a855f7; margin-bottom: 15px;'>
+                    <div style='color: #1f2937; font-size: 14px;'>ROAS (Return on Ad Spend)</div>
+                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>{metrics['ROAS']:.2f}x</div>
+                    <div style='color: #1f2937; font-size: 12px;'>Target: 4.0x | Min: 2.0x</div>
                 </div>
                 
                 <div style='padding: 15px; background-color: #fef3c7; border-left: 4px solid #f59e0b; margin-bottom: 15px;'>
-                    <div style='color: #1f2937; font-size: 14px;'>Total Purchases</div>
-                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>{int(metrics['totals']['purchases'])}</div>
+                    <div style='color: #1f2937; font-size: 14px;'>ACoS (Ad Cost of Sales)</div>
+                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>{metrics['ACoS']:.2f}%</div>
+                    <div style='color: #1f2937; font-size: 12px;'>Target: 25% | Max: 15%</div>
+                </div>
+                
+                <div style='padding: 15px; background-color: #fee2e2; border-left: 4px solid #ef4444; margin-bottom: 15px;'>
+                    <div style='color: #1f2937; font-size: 14px;'>Cost Per Acquisition</div>
+                    <div style='font-size: 28px; font-weight: bold; color: #000000;'>₹{metrics['CPA']:.2f}</div>
+                    <div style='color: #1f2937; font-size: 12px;'>Target: ₹300 | Max: ₹100</div>
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -548,8 +1132,9 @@ else:
                     df_filtered,
                     x="date",
                     y="spend",
-                    title="Daily Spend"
+                    title="Daily Spend & Revenue",
                 )
+                fig_spend.add_scatter(x=df_filtered['date'], y=df_filtered['revenue'], mode='lines', name='Revenue')
                 st.plotly_chart(fig_spend, use_container_width=True)
             
             st.divider()
@@ -561,9 +1146,9 @@ else:
                 st.subheader("🚨 Issues Detected & Recommendations")
                 
                 for issue in recommendations:
-                    with st.expander(f"{issue['priority']}: {issue['metric']} - Current: {issue['current']:.1f}% → Target: {issue['target']}%", expanded=True):
-                        st.markdown(f"**Current Performance:** {issue['current']:.2f}%")
-                        st.markdown(f"**Target Performance:** {issue['target']:.2f}%")
+                    with st.expander(f"{issue['priority']}: {issue['metric']} - Current: {issue['current']:.2f} → Target: {issue['target']:.2f}", expanded=True):
+                        st.markdown(f"**Current Performance:** {issue['current']:.2f}")
+                        st.markdown(f"**Target Performance:** {issue['target']:.2f}")
                         st.markdown("**Action Items:**")
                         
                         for rec in issue['recommendations']:
@@ -580,4 +1165,4 @@ else:
 
 # Footer
 st.markdown("---")
-st.markdown("**Meta Ads Live Dashboard** | Powered by Meta Marketing API | Real-time Analytics")
+st.markdown("**Meta Ads Live Dashboard** | Powered by Meta Marketing API | Real-time Analytics with ROAS & ACoS Tracking")
