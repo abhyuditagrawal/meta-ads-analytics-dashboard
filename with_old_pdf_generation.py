@@ -11,9 +11,6 @@ from facebook_business.adobjects.campaign import Campaign
 from facebook_business.adobjects.adset import AdSet
 from facebook_business.adobjects.ad import Ad
 
-# Import the new PDF generator (NO Kaleido/Chrome needed)
-from generate_pdf_report_v2 import generate_pdf_report as generate_pdf_report_v2
-
 # Page config
 st.set_page_config(
     page_title="Meta Ads Live Dashboard",
@@ -359,7 +356,7 @@ def calculate_metrics(df: pd.DataFrame) -> Dict:
         'ROAS': roas,
         'ACoS': acos,
         'AOV': aov,
-        'MER': roas,
+        'MER': roas,  # MER = total revenue / total spend (same as ROAS at single entity level; meaningful at account level)
 
         'totals': {
             'impressions': totals.impressions,
@@ -443,6 +440,7 @@ def get_status_emoji(metric_name: str, value: float) -> str:
         else:
             return '🚨'
     else:
+        # Lower is better (CPC, CPM, CPA, ACoS, Frequency, Cost_per_ATC, Cost_per_Checkout)
         if value <= bench['good']:
             return '✅'
         elif value <= bench['acceptable']:
@@ -803,6 +801,448 @@ def fetch_all_child_data(ad_account_id, selected_campaign_ids, date_preset, star
     return adset_data, ad_data
 
 
+def generate_pdf_report(product_name: str, df: pd.DataFrame, metrics: Dict, mode: str,
+                        ad_account_id: str = None, selected_campaign_ids: List[str] = None,
+                        date_preset: str = None, start_date=None, end_date=None) -> bytes:
+    """Generate a comprehensive PDF report with ALL dashboard data including new metrics"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib.enums import TA_CENTER
+        import plotly.io as pio
+
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), topMargin=0.4*inch, bottomMargin=0.4*inch,
+                                leftMargin=0.4*inch, rightMargin=0.4*inch)
+        story = []
+        styles = getSampleStyleSheet()
+
+        title_style = ParagraphStyle(
+            'CustomTitle', parent=styles['Heading1'], fontSize=24,
+            textColor=colors.HexColor('#1f2937'), spaceAfter=30,
+            alignment=TA_CENTER, fontName='Helvetica-Bold'
+        )
+        heading_style = ParagraphStyle(
+            'CustomHeading', parent=styles['Heading2'], fontSize=16,
+            textColor=colors.HexColor('#3b82f6'), spaceAfter=12, spaceBefore=12,
+            fontName='Helvetica-Bold'
+        )
+        subheading_style = ParagraphStyle(
+            'CustomSubHeading', parent=styles['Heading3'], fontSize=12,
+            textColor=colors.HexColor('#6b7280'), spaceAfter=8, fontName='Helvetica-Bold'
+        )
+
+        mode_emoji_map = {'Campaign Mode': '📊', 'Ad Set Mode': '🎯', 'Ad Mode': '🎨'}
+        story.append(Paragraph(f"{mode_emoji_map.get(mode, '📊')} Meta Ads Comprehensive Report", title_style))
+        story.append(Paragraph(f"Primary Entity: {product_name}", heading_style))
+        story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", styles['Normal']))
+        story.append(Spacer(1, 0.3*inch))
+
+        # ===== Executive Summary =====
+        story.append(Paragraph("Executive Summary", heading_style))
+        num_days = len(df['date'].unique())
+        summary_data = [
+            ['Metric', 'Value'],
+            ['Total Spend', f"₹{metrics['totals']['spend']:,.0f}"],
+            ['Total Revenue', f"₹{metrics['totals']['revenue']:,.0f}"],
+            ['Total Purchases', f"{int(metrics['totals']['purchases'])}"],
+            ['ROAS', f"{metrics['ROAS']:.2f}x"],
+            ['ACoS', f"{metrics['ACoS']:.2f}%"],
+            ['AOV', f"₹{metrics['AOV']:.0f}"],
+            ['MER', f"{metrics['MER']:.2f}x"],
+            ['CPA', f"₹{metrics['CPA']:.2f}"],
+            ['CPM', f"₹{metrics['CPM']:.2f}"],
+            ['Overall CVR', f"{metrics['Overall_CVR']:.2f}%"],
+            ['Days Analyzed', f"{num_days}"]
+        ]
+
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3b82f6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('TOPPADDING', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+        ]))
+        story.append(summary_table)
+        story.append(PageBreak())
+
+        # ===== All Metrics with Benchmarks =====
+        story.append(Paragraph("Complete Performance vs Benchmarks", heading_style))
+
+        all_metric_names = [
+            'CTR', 'Outbound_CTR', 'Hook_Rate', 'ThruPlay_Rate',
+            'CPM', 'Frequency', 'CPC',
+            'LP_View_Rate', 'View_Content_Rate', 'ATC_Rate', 'Checkout_Rate', 'Purchase_Rate', 'Overall_CVR',
+            'CPA', 'Cost_per_ATC', 'Cost_per_Checkout',
+            'ROAS', 'ACoS', 'AOV', 'MER'
+        ]
+
+        comparison_data = [['Metric', 'Your Value', 'Ideal', 'Min Acceptable', 'Gap', 'Rating', 'Status']]
+        for metric_name in all_metric_names:
+            if metric_name not in metrics or metric_name not in BENCHMARKS:
+                continue
+            actual_val = metrics[metric_name]
+            bench = BENCHMARKS[metric_name]
+            gap = actual_val - bench['ideal']
+            status = get_status_emoji(metric_name, actual_val)
+            rating = get_status_label(metric_name, actual_val)
+
+            comparison_data.append([
+                metric_name.replace('_', ' '),
+                f"{actual_val:.2f}{bench['unit']}",
+                f"{bench['ideal']:.2f}{bench['unit']}",
+                f"{bench['min']:.2f}{bench['unit']}",
+                f"{gap:+.2f}{bench['unit']}",
+                rating,
+                status
+            ])
+
+        comparison_table = Table(comparison_data, colWidths=[1.5*inch, 1.1*inch, 1.0*inch, 1.1*inch, 0.8*inch, 0.8*inch, 0.5*inch])
+        comparison_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#10b981')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 9),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 10),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            ('TOPPADDING', (0, 1), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+        ]))
+        story.append(comparison_table)
+        story.append(PageBreak())
+
+        # ===== Funnel Chart =====
+        story.append(Paragraph("Conversion Funnel Visualization", heading_style))
+        funnel_fig = create_funnel_chart(metrics)
+        img_bytes = pio.to_image(funnel_fig, format='png', width=900, height=550)
+        img_buffer = BytesIO(img_bytes)
+        img = Image(img_buffer, width=8*inch, height=4.5*inch)
+        story.append(img)
+        story.append(PageBreak())
+
+        # ===== Daily Trends Chart =====
+        story.append(Paragraph("Daily Performance Trends", heading_style))
+        fig_conversions = px.line(
+            df, x="date",
+            y=["clicks", "outbound_clicks", "lp_views", "view_content", "adds_to_cart", "checkouts", "purchases"],
+            title="Daily Conversions Trend",
+            labels={"value": "Count", "variable": "Metric", "date": "Date"}
+        )
+        fig_conversions.update_layout(width=900, height=450, showlegend=True)
+        conv_img_bytes = pio.to_image(fig_conversions, format='png', width=900, height=450)
+        conv_img_buffer = BytesIO(conv_img_bytes)
+        conv_img = Image(conv_img_buffer, width=8*inch, height=3.5*inch)
+        story.append(conv_img)
+        story.append(PageBreak())
+
+        # ===== Day-wise Performance Table =====
+        story.append(Paragraph("Day-wise Performance Breakdown", heading_style))
+
+        daily_metrics = calculate_daily_metrics(df)
+        daily_data = [['Date', 'CTR%', 'OutCTR%', 'Hook%', 'Thru%', 'CPM', 'CPC', 'LP%', 'VC%', 'ATC%', 'Chk%', 'Pur%', 'CVR%', 'ROAS', 'ACoS%', 'AOV', 'CPA']]
+
+        for _, row in daily_metrics.iterrows():
+            daily_data.append([
+                row['date'].strftime('%m/%d'),
+                f"{row['CTR']:.1f}",
+                f"{row['Outbound_CTR']:.1f}",
+                f"{row['Hook_Rate']:.1f}",
+                f"{row['ThruPlay_Rate']:.1f}",
+                f"{row['CPM']:.0f}",
+                f"{row['CPC']:.1f}",
+                f"{row['LP_View_Rate']:.1f}",
+                f"{row['View_Content_Rate']:.1f}",
+                f"{row['ATC_Rate']:.1f}",
+                f"{row['Checkout_Rate']:.1f}",
+                f"{row['Purchase_Rate']:.1f}",
+                f"{row['Overall_CVR']:.1f}",
+                f"{row['ROAS']:.2f}",
+                f"{row['ACoS']:.1f}",
+                f"{row['AOV']:.0f}",
+                f"{row['CPA']:.0f}"
+            ])
+
+        col_w = 0.58 * inch
+        daily_table = Table(daily_data, colWidths=[0.55*inch] + [col_w]*16)
+        daily_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3b82f6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 5.5),
+            ('TOPPADDING', (0, 1), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+        ]))
+        story.append(daily_table)
+        story.append(PageBreak())
+
+        # ===== Performance vs Benchmarks Charts =====
+        story.append(Paragraph("Performance vs Benchmarks - Charts", heading_style))
+
+        chart_metrics = ['CTR', 'Hook_Rate', 'ATC_Rate', 'Checkout_Rate', 'Overall_CVR', 'ROAS', 'CPM', 'CPC']
+        for cm in chart_metrics:
+            chart = create_actual_vs_ideal_chart(df, cm)
+            if chart:
+                chart_img = pio.to_image(chart, format='png', width=900, height=400)
+                chart_img_buffer = BytesIO(chart_img)
+                story.append(Image(chart_img_buffer, width=8*inch, height=3.2*inch))
+                story.append(Spacer(1, 0.15*inch))
+
+        story.append(PageBreak())
+
+        # ===== Raw Data Table =====
+        story.append(Paragraph("Raw Data - Main Entity", subheading_style))
+        raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend', 'cpm',
+                    'video_3s_views', 'video_thruplay', 'lp_views', 'view_content',
+                    'adds_to_cart', 'checkouts', 'purchases', 'revenue']
+        raw_display = df[raw_cols].copy()
+        raw_display['date'] = pd.to_datetime(raw_display['date']).dt.strftime('%Y-%m-%d')
+
+        raw_data = [['Date', 'Entity', 'Impr', 'Clk', 'OutClk', 'Spend', 'CPM', '3sV', 'Thru', 'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']]
+        for _, row in raw_display.head(60).iterrows():
+            raw_data.append([
+                row['date'],
+                str(row['product'])[:15] + '...' if len(str(row['product'])) > 15 else row['product'],
+                f"{int(row['impressions'])}",
+                f"{int(row['clicks'])}",
+                f"{int(row['outbound_clicks'])}",
+                f"{row['spend']:.0f}",
+                f"{row['cpm']:.0f}",
+                f"{int(row['video_3s_views'])}",
+                f"{int(row['video_thruplay'])}",
+                f"{int(row['lp_views'])}",
+                f"{int(row['view_content'])}",
+                f"{int(row['adds_to_cart'])}",
+                f"{int(row['checkouts'])}",
+                f"{int(row['purchases'])}",
+                f"{row['revenue']:.0f}"
+            ])
+
+        cw = 0.65 * inch
+        raw_table = Table(raw_data, colWidths=[0.6*inch, 1.0*inch] + [cw]*13)
+        raw_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8b5cf6')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 5.5),
+            ('TOPPADDING', (0, 1), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
+        ]))
+        story.append(raw_table)
+        story.append(Paragraph(f"Total rows: {len(raw_display)}", styles['Normal']))
+        story.append(PageBreak())
+
+        # ===== Child Entities (Campaign Mode) =====
+        if mode == 'Campaign Mode' and ad_account_id and selected_campaign_ids:
+            adset_data, ad_data = fetch_all_child_data(ad_account_id, selected_campaign_ids, date_preset, start_date, end_date)
+
+            if adset_data is not None and len(adset_data) > 0:
+                story.append(Paragraph("Active Ad Sets Analysis", heading_style))
+                unique_adsets = adset_data['product'].unique()
+                story.append(Paragraph(f"Found {len(unique_adsets)} active ad set(s)", subheading_style))
+                story.append(Spacer(1, 0.1*inch))
+
+                for adset_name in unique_adsets[:10]:
+                    adset_df = adset_data[adset_data['product'] == adset_name]
+                    adset_metrics = calculate_metrics(adset_df)
+
+                    adset_summary = [
+                        ['Metric', 'Value'],
+                        ['Ad Set', str(adset_name)[:40]],
+                        ['Spend', f"₹{adset_metrics['totals']['spend']:,.0f}"],
+                        ['Revenue', f"₹{adset_metrics['totals']['revenue']:,.0f}"],
+                        ['ROAS', f"{adset_metrics['ROAS']:.2f}x"],
+                        ['ACoS', f"{adset_metrics['ACoS']:.2f}%"],
+                        ['AOV', f"₹{adset_metrics['AOV']:.0f}"],
+                        ['CPM', f"₹{adset_metrics['CPM']:.2f}"],
+                        ['Hook Rate', f"{adset_metrics['Hook_Rate']:.2f}%"],
+                        ['Cost/ATC', f"₹{adset_metrics['Cost_per_ATC']:.0f}"],
+                        ['Cost/Purchase', f"₹{adset_metrics['CPA']:.0f}"],
+                    ]
+
+                    adset_table = Table(adset_summary, colWidths=[2*inch, 3*inch])
+                    adset_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8b5cf6')),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 10),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                        ('FONTSIZE', (0, 1), (-1, -1), 9),
+                    ]))
+                    story.append(adset_table)
+                    story.append(Spacer(1, 0.15*inch))
+
+                story.append(PageBreak())
+
+                # Raw data for ad sets
+                story.append(Paragraph("Raw Data - All Active Ad Sets", subheading_style))
+                adset_raw = adset_data[raw_cols].copy()
+                adset_raw['date'] = pd.to_datetime(adset_raw['date']).dt.strftime('%Y-%m-%d')
+
+                adset_raw_data = [['Date', 'Ad Set', 'Impr', 'Clk', 'OutClk', 'Spend', 'CPM', '3sV', 'Thru', 'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']]
+                for _, row in adset_raw.iterrows():
+                    adset_raw_data.append([
+                        row['date'],
+                        str(row['product'])[:15] + '...' if len(str(row['product'])) > 15 else row['product'],
+                        f"{int(row['impressions'])}", f"{int(row['clicks'])}", f"{int(row['outbound_clicks'])}",
+                        f"{row['spend']:.0f}", f"{row['cpm']:.0f}",
+                        f"{int(row['video_3s_views'])}", f"{int(row['video_thruplay'])}",
+                        f"{int(row['lp_views'])}", f"{int(row['view_content'])}",
+                        f"{int(row['adds_to_cart'])}", f"{int(row['checkouts'])}",
+                        f"{int(row['purchases'])}", f"{row['revenue']:.0f}"
+                    ])
+
+                adset_raw_table = Table(adset_raw_data, colWidths=[0.6*inch, 1.0*inch] + [cw]*13)
+                adset_raw_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#8b5cf6')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 6),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.lavender),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 1), (-1, -1), 5.5),
+                    ('TOPPADDING', (0, 1), (-1, -1), 3),
+                    ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
+                ]))
+                story.append(adset_raw_table)
+                story.append(Paragraph(f"Total rows: {len(adset_raw)}", styles['Normal']))
+                story.append(PageBreak())
+
+                # Active Ads
+                if ad_data is not None and len(ad_data) > 0:
+                    story.append(Paragraph("Active Ads Analysis", heading_style))
+                    unique_ads = ad_data['product'].unique()
+                    story.append(Paragraph(f"Found {len(unique_ads)} active ad(s)", subheading_style))
+                    story.append(Spacer(1, 0.1*inch))
+
+                    for ad_name in unique_ads:
+                        ad_df = ad_data[ad_data['product'] == ad_name]
+                        ad_m = calculate_metrics(ad_df)
+
+                        ad_summary = [
+                            ['Metric', 'Value'],
+                            ['Ad', str(ad_name)[:40]],
+                            ['Spend', f"₹{ad_m['totals']['spend']:,.0f}"],
+                            ['Revenue', f"₹{ad_m['totals']['revenue']:,.0f}"],
+                            ['ROAS', f"{ad_m['ROAS']:.2f}x"],
+                            ['ACoS', f"{ad_m['ACoS']:.2f}%"],
+                            ['AOV', f"₹{ad_m['AOV']:.0f}"],
+                            ['CTR', f"{ad_m['CTR']:.2f}%"],
+                            ['Hook Rate', f"{ad_m['Hook_Rate']:.2f}%"],
+                            ['CVR', f"{ad_m['Overall_CVR']:.2f}%"],
+                            ['Cost/ATC', f"₹{ad_m['Cost_per_ATC']:.0f}"],
+                            ['Cost/Purchase', f"₹{ad_m['CPA']:.0f}"],
+                        ]
+
+                        ad_table = Table(ad_summary, colWidths=[2*inch, 2*inch])
+                        ad_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ec4899')),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 10),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.pink),
+                            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                            ('FONTSIZE', (0, 1), (-1, -1), 9),
+                            ('TOPPADDING', (0, 1), (-1, -1), 6),
+                            ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                        ]))
+                        story.append(ad_table)
+                        story.append(Spacer(1, 0.15*inch))
+
+                    story.append(PageBreak())
+
+                    # Raw data for ads
+                    story.append(Paragraph("Raw Data - All Active Ads", subheading_style))
+                    ad_raw = ad_data[raw_cols].copy()
+                    ad_raw['date'] = pd.to_datetime(ad_raw['date']).dt.strftime('%Y-%m-%d')
+
+                    ad_raw_data = [['Date', 'Ad Name', 'Impr', 'Clk', 'OutClk', 'Spend', 'CPM', '3sV', 'Thru', 'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']]
+                    for _, row in ad_raw.iterrows():
+                        ad_raw_data.append([
+                            row['date'],
+                            str(row['product'])[:15] + '...' if len(str(row['product'])) > 15 else row['product'],
+                            f"{int(row['impressions'])}", f"{int(row['clicks'])}", f"{int(row['outbound_clicks'])}",
+                            f"{row['spend']:.0f}", f"{row['cpm']:.0f}",
+                            f"{int(row['video_3s_views'])}", f"{int(row['video_thruplay'])}",
+                            f"{int(row['lp_views'])}", f"{int(row['view_content'])}",
+                            f"{int(row['adds_to_cart'])}", f"{int(row['checkouts'])}",
+                            f"{int(row['purchases'])}", f"{row['revenue']:.0f}"
+                        ])
+
+                    ad_raw_table = Table(ad_raw_data, colWidths=[0.6*inch, 1.0*inch] + [cw]*13)
+                    ad_raw_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ec4899')),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 6),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.pink),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                        ('FONTSIZE', (0, 1), (-1, -1), 5.5),
+                        ('TOPPADDING', (0, 1), (-1, -1), 3),
+                        ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
+                    ]))
+                    story.append(ad_raw_table)
+                    story.append(Paragraph(f"Total rows: {len(ad_raw)}", styles['Normal']))
+                    story.append(PageBreak())
+
+        # ===== Recommendations =====
+        recommendations = get_recommendations(metrics)
+        if recommendations:
+            story.append(Paragraph("Issues Detected & Recommendations", heading_style))
+
+            for issue in recommendations:
+                priority_color = '#ef4444' if issue['priority'] == 'CRITICAL' else '#f97316' if issue['priority'] == 'HIGH' else '#f59e0b'
+                story.append(Paragraph(f"<font color='{priority_color}'><b>{issue['priority']}: {issue['metric']}</b></font>", subheading_style))
+                story.append(Paragraph(f"Current: {issue['current']:.2f} | Target: {issue['target']:.2f}", styles['Normal']))
+                story.append(Spacer(1, 0.1*inch))
+                for rec in issue['recommendations']:
+                    story.append(Paragraph(f"  - {rec}", styles['Normal']))
+                story.append(Spacer(1, 0.2*inch))
+
+        doc.build(story)
+        buffer.seek(0)
+        return buffer.getvalue()
+
+    except ImportError:
+        st.error("PDF generation requires reportlab and kaleido. Install with: pip install reportlab kaleido")
+        return None
+    except Exception as e:
+        st.error(f"Error generating PDF: {str(e)}")
+        return None
+
+
 # ==================== MAIN APP ====================
 
 st.title("📊 Meta Ads Live Analytics Dashboard")
@@ -869,7 +1309,7 @@ if not st.session_state.api_initialized:
     - ✅ **Multi-level analysis: Campaign, Ad Set, and Ad modes**
     - ✅ Comprehensive visualizations (gauges, trends, benchmarks)
     - ✅ **Day-wise performance breakdown with all metrics**
-    - ✅ **PDF report generation (works on Streamlit Cloud!)**
+    - ✅ **PDF report generation with complete data**
     - ✅ Automated insights and recommendations
     - ✅ No manual Excel uploads needed!
     """)
@@ -1306,24 +1746,16 @@ else:
             with col3:
                 st.metric("Total Spend", f"₹{metrics['totals']['spend']:,.0f}")
             with col4:
-                # ===== NEW PDF GENERATOR (no Kaleido/Chrome needed) =====
-                pdf_bytes = generate_pdf_report_v2(
+                pdf_bytes = generate_pdf_report(
                     selected_product,
                     df_filtered,
                     metrics,
                     current_mode,
-                    ad_account_id=st.session_state.saved_ad_account_id if current_mode == 'Campaign Mode' else None,
-                    selected_campaign_ids=st.session_state.get('export_campaign_ids', []) if current_mode == 'Campaign Mode' else None,
-                    date_preset=st.session_state.get('date_preset', 'last_30d'),
-                    start_date=st.session_state.get('start_date', None),
-                    end_date=st.session_state.get('end_date', None),
-                    BENCHMARKS=BENCHMARKS,
-                    calculate_metrics=calculate_metrics,
-                    calculate_daily_metrics=calculate_daily_metrics,
-                    get_status_emoji=get_status_emoji,
-                    get_status_label=get_status_label,
-                    get_recommendations=get_recommendations,
-                    fetch_all_child_data=fetch_all_child_data,
+                    st.session_state.saved_ad_account_id if current_mode == 'Campaign Mode' else None,
+                    st.session_state.get('export_campaign_ids', []) if current_mode == 'Campaign Mode' else None,
+                    st.session_state.get('date_preset', 'last_30d'),
+                    st.session_state.get('start_date', None),
+                    st.session_state.get('end_date', None)
                 )
                 if pdf_bytes:
                     st.download_button(
@@ -1375,6 +1807,7 @@ else:
                     ideal = BENCHMARKS[metric_name]['ideal']
                     delta_val = value - ideal
                     unit = BENCHMARKS[metric_name]['unit']
+                    # For lower-is-better metrics, invert delta display
                     display_delta = -delta_val if not BENCHMARKS[metric_name]['higher_better'] else delta_val
                     st.metric(
                         label=f"{emoji} {label}",
@@ -1425,7 +1858,7 @@ else:
                     ideal = BENCHMARKS[metric_name]['ideal']
                     delta_val = value - ideal
                     unit = BENCHMARKS[metric_name]['unit']
-                    display_delta = -delta_val
+                    display_delta = -delta_val  # Lower is better
                     st.metric(
                         label=f"{emoji} {label}",
                         value=f"{unit}{value:.0f}",
