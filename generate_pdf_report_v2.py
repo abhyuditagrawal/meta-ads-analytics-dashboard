@@ -323,6 +323,86 @@ def make_daily_trend_drawing(daily_df, y_cols, title, width=680, height=240):
 
 
 # ─────────────────────────────────────────────────────────
+# HELPER: Trend chart WITH benchmark lines (ideal + min)
+# ─────────────────────────────────────────────────────────
+def make_daily_trend_with_benchmark(daily_df, metric_col, ideal_val, min_val, title, width=680, height=180):
+    """Create a line chart for a single metric with ideal and min benchmark lines."""
+    d = Drawing(width, height)
+
+    if daily_df is None or len(daily_df) == 0 or metric_col not in daily_df.columns:
+        d.add(String(width / 2, height / 2, "No data", fontSize=10,
+                     fontName='Helvetica', fillColor=C.GRAY, textAnchor='middle'))
+        return d
+
+    d.add(String(width / 2, height - 10, title, fontSize=9,
+                 fontName='Helvetica-Bold', fillColor=C.DARK, textAnchor='middle'))
+
+    chart = LinePlot()
+    chart.x = 50
+    chart.y = 30
+    chart.width = width - 80
+    chart.height = height - 55
+
+    vals = daily_df[metric_col].tolist()
+    n = len(vals)
+    actual_data = [(i, float(v)) for i, v in enumerate(vals)]
+    ideal_data = [(i, float(ideal_val)) for i in range(n)]
+    min_data = [(i, float(min_val)) for i in range(n)]
+
+    chart.data = [actual_data, ideal_data, min_data]
+
+    # Actual line
+    chart.lines[0].strokeColor = colors.HexColor('#2563eb')
+    chart.lines[0].strokeWidth = 2
+    chart.lines[0].symbol = makeMarker('FilledCircle', size=2)
+
+    # Ideal line (green dashed)
+    chart.lines[1].strokeColor = colors.HexColor('#059669')
+    chart.lines[1].strokeWidth = 1.5
+    chart.lines[1].strokeDashArray = [4, 2]
+
+    # Min line (orange dotted)
+    chart.lines[2].strokeColor = colors.HexColor('#d97706')
+    chart.lines[2].strokeWidth = 1
+    chart.lines[2].strokeDashArray = [2, 2]
+
+    chart.xValueAxis.labels.fontSize = 5
+    chart.xValueAxis.labels.fontName = 'Helvetica'
+    chart.xValueAxis.visibleGrid = True
+    chart.xValueAxis.gridStrokeColor = C.BORDER
+    chart.xValueAxis.gridStrokeWidth = 0.2
+
+    chart.yValueAxis.labels.fontSize = 6
+    chart.yValueAxis.labels.fontName = 'Helvetica'
+    chart.yValueAxis.visibleGrid = True
+    chart.yValueAxis.gridStrokeColor = C.BORDER
+    chart.yValueAxis.gridStrokeWidth = 0.2
+
+    # Date labels
+    if n > 0:
+        dates = daily_df['date'].tolist()
+        step = max(1, n // 8)
+        label_map = {}
+        for i in range(0, n, step):
+            try:
+                label_map[i] = dates[i].strftime('%m/%d')
+            except Exception:
+                label_map[i] = str(i)
+        chart.xValueAxis.labelTextFormat = lambda val, label_map=label_map: label_map.get(int(round(val)), '')
+
+    d.add(chart)
+
+    # Legend
+    lx = 60
+    for label, col in [('Actual', '#2563eb'), ('Ideal', '#059669'), ('Min', '#d97706')]:
+        d.add(Rect(lx, 8, 8, 8, fillColor=colors.HexColor(col), strokeColor=None))
+        d.add(String(lx + 11, 9, label, fontSize=6, fontName='Helvetica', fillColor=C.GRAY))
+        lx += 50
+
+    return d
+
+
+# ─────────────────────────────────────────────────────────
 # MAIN FUNCTION — drop-in replacement
 # ─────────────────────────────────────────────────────────
 def generate_pdf_report(product_name, df, metrics, mode,
@@ -648,14 +728,34 @@ def generate_pdf_report(product_name, df, metrics, mode,
         story.append(PageBreak())
 
         # ═══════════════════════════════════════════
+        #  PAGE 5b — METRIC vs BENCHMARK CHARTS
+        # ═══════════════════════════════════════════
+        story.append(Paragraph("Performance vs Benchmarks — Individual Metrics", styles['SectionHead']))
+
+        chart_metrics = ['CTR', 'Hook_Rate', 'ATC_Rate', 'Checkout_Rate', 'Overall_CVR', 'ROAS', 'CPM', 'CPC']
+        for cm in chart_metrics:
+            if BENCHMARKS and cm in BENCHMARKS:
+                bench = BENCHMARKS[cm]
+                chart_d = make_daily_trend_with_benchmark(
+                    daily_m, cm, bench['ideal'], bench['min'],
+                    f"{cm.replace('_', ' ')} — Actual vs Ideal ({bench['ideal']}{bench['unit']}) / Min ({bench['min']}{bench['unit']})",
+                    width=680, height=180
+                )
+                story.append(chart_d)
+                story.append(Spacer(1, 0.08 * inch))
+
+        story.append(PageBreak())
+
+        # ═══════════════════════════════════════════
         #  PAGE 6 — RAW DATA
         # ═══════════════════════════════════════════
         story.append(Paragraph("Raw Data Export", styles['SectionHead']))
 
-        raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend',
-                    'lp_views', 'view_content', 'adds_to_cart', 'checkouts', 'purchases', 'revenue']
-        raw_headers = ['Date', 'Entity', 'Impr', 'Clk', 'OutClk', 'Spend',
-                       'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']
+        raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend', 'cpm',
+                    'video_3s_views', 'video_thruplay', 'lp_views', 'view_content',
+                    'adds_to_cart', 'checkouts', 'purchases', 'revenue']
+        raw_headers = ['Date', 'Entity', 'Impr', 'Clk', 'OutClk', 'Spend', 'CPM',
+                       '3sV', 'Thru', 'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']
 
         available_cols = [c for c in raw_cols if c in df.columns]
         raw_rows = [raw_headers[:len(available_cols)]]
@@ -714,27 +814,31 @@ def generate_pdf_report(product_name, df, metrics, mode,
                     story.append(Spacer(1, 0.1 * inch))
 
                     # Summary table for all ad sets
-                    adset_summary = [['Ad Set', 'Spend', 'Revenue', 'ROAS', 'CPA', 'CTR%', 'Hook%', 'CVR%', 'Rating']]
+                    adset_summary = [['Ad Set', 'Spend', 'Revenue', 'ROAS', 'ACoS', 'AOV', 'CPA', 'CPM', 'CTR%', 'Hook%', 'CVR%', 'Cost/ATC', 'Rating']]
                     for aname in unique_adsets[:15]:
                         adf = adset_data[adset_data['product'] == aname]
                         am = calculate_metrics(adf)
                         roas_val = am.get('ROAS', 0)
                         rating = 'Strong' if roas_val >= 3 else 'OK' if roas_val >= 2 else 'Weak'
                         adset_summary.append([
-                            str(aname)[:25],
+                            str(aname)[:22],
                             f"₹{am['totals']['spend']:,.0f}",
                             f"₹{am['totals']['revenue']:,.0f}",
                             f"{roas_val:.2f}x",
+                            f"{am.get('ACoS', 0):.1f}%",
+                            f"₹{am.get('AOV', 0):,.0f}",
                             f"₹{am.get('CPA', 0):,.0f}",
+                            f"₹{am.get('CPM', 0):,.0f}",
                             f"{am.get('CTR', 0):.2f}",
                             f"{am.get('Hook_Rate', 0):.1f}",
                             f"{am.get('Overall_CVR', 0):.2f}",
+                            f"₹{am.get('Cost_per_ATC', 0):,.0f}",
                             rating,
                         ])
 
                     as_table = Table(adset_summary, colWidths=[
-                        1.8*inch, 0.8*inch, 0.8*inch, 0.7*inch, 0.7*inch,
-                        0.6*inch, 0.6*inch, 0.6*inch, 0.7*inch
+                        1.5*inch, 0.65*inch, 0.65*inch, 0.55*inch, 0.55*inch, 0.55*inch,
+                        0.55*inch, 0.55*inch, 0.5*inch, 0.5*inch, 0.5*inch, 0.6*inch, 0.55*inch
                     ])
                     as_style = [
                         ('BACKGROUND', (0, 0), (-1, 0), C.PURPLE),
@@ -761,6 +865,52 @@ def generate_pdf_report(product_name, df, metrics, mode,
 
                     as_table.setStyle(TableStyle(as_style))
                     story.append(as_table)
+                    story.append(Spacer(1, 0.15 * inch))
+
+                    # Ad Set Raw Data table
+                    story.append(Paragraph("Raw Data — All Active Ad Sets", styles['SubSection']))
+                    child_raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend', 'cpm',
+                                     'video_3s_views', 'video_thruplay', 'lp_views', 'view_content',
+                                     'adds_to_cart', 'checkouts', 'purchases', 'revenue']
+                    child_raw_headers = ['Date', 'Ad Set', 'Impr', 'Clk', 'OutClk', 'Spend', 'CPM',
+                                         '3sV', 'Thru', 'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']
+                    avail_child_cols = [c for c in child_raw_cols if c in adset_data.columns]
+                    adset_raw_rows = [child_raw_headers[:len(avail_child_cols)]]
+                    for _, row in adset_data.iterrows():
+                        r = []
+                        for col in avail_child_cols:
+                            if col == 'date':
+                                try: r.append(row[col].strftime('%m/%d'))
+                                except: r.append(str(row.get(col, ''))[:5])
+                            elif col == 'product':
+                                name = str(row.get(col, ''))
+                                r.append(name[:15] + '..' if len(name) > 15 else name)
+                            elif col in ('spend', 'revenue'):
+                                r.append(f"{float(row.get(col, 0)):,.0f}")
+                            elif col == 'cpm':
+                                r.append(f"{float(row.get(col, 0)):.0f}")
+                            else:
+                                r.append(f"{int(row.get(col, 0)):,}")
+                        adset_raw_rows.append(r)
+
+                    n_c = len(avail_child_cols)
+                    child_cw = page_w / n_c
+                    adset_raw_tbl = Table(adset_raw_rows, colWidths=[child_cw] * n_c)
+                    adset_raw_tbl.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), C.PURPLE),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), C.WHITE),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 6),
+                        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                        ('FONTSIZE', (0, 1), (-1, -1), 5.5),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [C.WHITE, colors.HexColor('#f5f3ff')]),
+                        ('GRID', (0, 0), (-1, -1), 0.3, C.BORDER),
+                        ('ALIGN', (2, 0), (-1, -1), 'CENTER'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 3),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ]))
+                    story.append(adset_raw_tbl)
+                    story.append(Paragraph(f"Total rows: {len(adset_data)}", styles['SmallGray']))
                     story.append(PageBreak())
 
                 # Ads summary
@@ -770,27 +920,30 @@ def generate_pdf_report(product_name, df, metrics, mode,
                     story.append(Paragraph(f"{len(unique_ads)} active ad(s) found", styles['SmallGray']))
                     story.append(Spacer(1, 0.1 * inch))
 
-                    ad_summary = [['Ad Name', 'Spend', 'Revenue', 'ROAS', 'CPA', 'CTR%', 'Hook%', 'CVR%', 'Rating']]
+                    ad_summary = [['Ad Name', 'Spend', 'Revenue', 'ROAS', 'ACoS', 'AOV', 'CPA', 'CTR%', 'Hook%', 'CVR%', 'Cost/ATC', 'Rating']]
                     for adname in unique_ads[:20]:
                         addf = ad_data[ad_data['product'] == adname]
                         adm = calculate_metrics(addf)
                         roas_val = adm.get('ROAS', 0)
                         rating = 'Strong' if roas_val >= 3 else 'OK' if roas_val >= 2 else 'Weak'
                         ad_summary.append([
-                            str(adname)[:25],
+                            str(adname)[:22],
                             f"₹{adm['totals']['spend']:,.0f}",
                             f"₹{adm['totals']['revenue']:,.0f}",
                             f"{roas_val:.2f}x",
+                            f"{adm.get('ACoS', 0):.1f}%",
+                            f"₹{adm.get('AOV', 0):,.0f}",
                             f"₹{adm.get('CPA', 0):,.0f}",
                             f"{adm.get('CTR', 0):.2f}",
                             f"{adm.get('Hook_Rate', 0):.1f}",
                             f"{adm.get('Overall_CVR', 0):.2f}",
+                            f"₹{adm.get('Cost_per_ATC', 0):,.0f}",
                             rating,
                         ])
 
                     ad_tbl = Table(ad_summary, colWidths=[
-                        1.8*inch, 0.8*inch, 0.8*inch, 0.7*inch, 0.7*inch,
-                        0.6*inch, 0.6*inch, 0.6*inch, 0.7*inch
+                        1.5*inch, 0.7*inch, 0.7*inch, 0.6*inch, 0.55*inch, 0.55*inch,
+                        0.6*inch, 0.5*inch, 0.5*inch, 0.5*inch, 0.6*inch, 0.55*inch
                     ])
                     ad_s = [
                         ('BACKGROUND', (0, 0), (-1, 0), C.PINK),
@@ -815,6 +968,52 @@ def generate_pdf_report(product_name, df, metrics, mode,
                             ad_s.append(('BACKGROUND', (-1, ri), (-1, ri), C.DANGER_BG))
                     ad_tbl.setStyle(TableStyle(ad_s))
                     story.append(ad_tbl)
+                    story.append(Spacer(1, 0.15 * inch))
+
+                    # Ad Raw Data table
+                    story.append(Paragraph("Raw Data — All Active Ads", styles['SubSection']))
+                    ad_raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend', 'cpm',
+                                  'video_3s_views', 'video_thruplay', 'lp_views', 'view_content',
+                                  'adds_to_cart', 'checkouts', 'purchases', 'revenue']
+                    ad_raw_headers = ['Date', 'Ad Name', 'Impr', 'Clk', 'OutClk', 'Spend', 'CPM',
+                                      '3sV', 'Thru', 'LP', 'VC', 'ATC', 'Chk', 'Pur', 'Rev']
+                    avail_ad_cols = [c for c in ad_raw_cols if c in ad_data.columns]
+                    ad_raw_rows = [ad_raw_headers[:len(avail_ad_cols)]]
+                    for _, row in ad_data.iterrows():
+                        r = []
+                        for col in avail_ad_cols:
+                            if col == 'date':
+                                try: r.append(row[col].strftime('%m/%d'))
+                                except: r.append(str(row.get(col, ''))[:5])
+                            elif col == 'product':
+                                name = str(row.get(col, ''))
+                                r.append(name[:15] + '..' if len(name) > 15 else name)
+                            elif col in ('spend', 'revenue'):
+                                r.append(f"{float(row.get(col, 0)):,.0f}")
+                            elif col == 'cpm':
+                                r.append(f"{float(row.get(col, 0)):.0f}")
+                            else:
+                                r.append(f"{int(row.get(col, 0)):,}")
+                        ad_raw_rows.append(r)
+
+                    n_ac = len(avail_ad_cols)
+                    ad_raw_cw = page_w / n_ac
+                    ad_raw_tbl = Table(ad_raw_rows, colWidths=[ad_raw_cw] * n_ac)
+                    ad_raw_tbl.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), C.PINK),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), C.WHITE),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 6),
+                        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                        ('FONTSIZE', (0, 1), (-1, -1), 5.5),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [C.WHITE, C.PINK_BG]),
+                        ('GRID', (0, 0), (-1, -1), 0.3, C.BORDER),
+                        ('ALIGN', (2, 0), (-1, -1), 'CENTER'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 3),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                    ]))
+                    story.append(ad_raw_tbl)
+                    story.append(Paragraph(f"Total rows: {len(ad_data)}", styles['SmallGray']))
                     story.append(PageBreak())
 
             except Exception as child_err:
