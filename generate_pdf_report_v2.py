@@ -808,20 +808,47 @@ def generate_pdf_report(product_name, df, metrics, mode,
                 )
 
                 if adset_data is not None and len(adset_data) > 0 and calculate_metrics:
-                    story.append(Paragraph("Ad Set Performance Summary", styles['SectionHead']))
+                    story.append(Paragraph("All Ad Sets Performance Summary", styles['SectionHead']))
                     unique_adsets = adset_data['product'].unique()
-                    story.append(Paragraph(f"{len(unique_adsets)} active ad set(s) found", styles['SmallGray']))
+
+                    # Count active vs paused
+                    has_status = 'entity_status' in adset_data.columns
+                    if has_status:
+                        status_counts = adset_data.groupby('product')['entity_status'].first()
+                        n_active = (status_counts == 'ACTIVE').sum()
+                        n_paused = (status_counts == 'PAUSED').sum()
+                        n_other = len(status_counts) - n_active - n_paused
+                        status_note = f"{len(unique_adsets)} ad set(s) with data"
+                        if n_active > 0:
+                            status_note += f" — {n_active} active"
+                        if n_paused > 0:
+                            status_note += f", {n_paused} paused"
+                        if n_other > 0:
+                            status_note += f", {n_other} other"
+                    else:
+                        status_note = f"{len(unique_adsets)} ad set(s) with data"
+
+                    story.append(Paragraph(status_note, styles['SmallGray']))
                     story.append(Spacer(1, 0.1 * inch))
 
-                    # Summary table for all ad sets
-                    adset_summary = [['Ad Set', 'Spend', 'Revenue', 'ROAS', 'ACoS', 'AOV', 'CPA', 'CPM', 'CTR%', 'Hook%', 'CVR%', 'Cost/ATC', 'Rating']]
+                    # Summary table for all ad sets — with Status column
+                    adset_summary = [['Status', 'Ad Set', 'Spend', 'Revenue', 'ROAS', 'ACoS', 'AOV', 'CPA', 'CPM', 'CTR%', 'Hook%', 'CVR%', 'Cost/ATC', 'Rating']]
                     for aname in unique_adsets[:15]:
                         adf = adset_data[adset_data['product'] == aname]
                         am = calculate_metrics(adf)
                         roas_val = am.get('ROAS', 0)
                         rating = 'Strong' if roas_val >= 3 else 'OK' if roas_val >= 2 else 'Weak'
+
+                        # Get status for this entity
+                        if has_status:
+                            entity_st = adf['entity_status'].iloc[0] if len(adf) > 0 else 'UNKNOWN'
+                        else:
+                            entity_st = 'UNKNOWN'
+                        status_label = 'ACTIVE' if entity_st == 'ACTIVE' else 'PAUSED' if entity_st == 'PAUSED' else entity_st
+
                         adset_summary.append([
-                            str(aname)[:22],
+                            status_label,
+                            str(aname)[:20],
                             f"₹{am['totals']['spend']:,.0f}",
                             f"₹{am['totals']['revenue']:,.0f}",
                             f"{roas_val:.2f}x",
@@ -837,24 +864,34 @@ def generate_pdf_report(product_name, df, metrics, mode,
                         ])
 
                     as_table = Table(adset_summary, colWidths=[
-                        1.5*inch, 0.65*inch, 0.65*inch, 0.55*inch, 0.55*inch, 0.55*inch,
-                        0.55*inch, 0.55*inch, 0.5*inch, 0.5*inch, 0.5*inch, 0.6*inch, 0.55*inch
+                        0.55*inch, 1.3*inch, 0.6*inch, 0.6*inch, 0.5*inch, 0.5*inch, 0.5*inch,
+                        0.5*inch, 0.5*inch, 0.45*inch, 0.45*inch, 0.45*inch, 0.55*inch, 0.5*inch
                     ])
                     as_style = [
                         ('BACKGROUND', (0, 0), (-1, 0), C.PURPLE),
                         ('TEXTCOLOR', (0, 0), (-1, 0), C.WHITE),
                         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ('FONTSIZE', (0, 0), (-1, 0), 8),
+                        ('FONTSIZE', (0, 0), (-1, 0), 7),
                         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                        ('FONTSIZE', (0, 1), (-1, -1), 7.5),
+                        ('FONTSIZE', (0, 1), (-1, -1), 7),
                         ('GRID', (0, 0), (-1, -1), 0.4, C.BORDER),
                         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [C.WHITE, C.PURPLE_BG]),
-                        ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
-                        ('TOPPADDING', (0, 0), (-1, -1), 5),
-                        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('ALIGN', (1, 1), (1, -1), 'LEFT'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 4),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                     ]
-                    # Color-code rating
+                    # Color-code status and rating columns
                     for ri in range(1, len(adset_summary)):
+                        # Status column color
+                        st_val = adset_summary[ri][0]
+                        if st_val == 'ACTIVE':
+                            as_style.append(('BACKGROUND', (0, ri), (0, ri), C.SUCCESS_BG))
+                            as_style.append(('TEXTCOLOR', (0, ri), (0, ri), C.SUCCESS))
+                        elif st_val == 'PAUSED':
+                            as_style.append(('BACKGROUND', (0, ri), (0, ri), C.WARNING_BG))
+                            as_style.append(('TEXTCOLOR', (0, ri), (0, ri), C.WARNING))
+                        # Rating column color
                         r = adset_summary[ri][-1]
                         if r == 'Strong':
                             as_style.append(('BACKGROUND', (-1, ri), (-1, ri), C.SUCCESS_BG))
@@ -868,7 +905,7 @@ def generate_pdf_report(product_name, df, metrics, mode,
                     story.append(Spacer(1, 0.15 * inch))
 
                     # Ad Set Raw Data table
-                    story.append(Paragraph("Raw Data — All Active Ad Sets", styles['SubSection']))
+                    story.append(Paragraph("Raw Data — All Ad Sets", styles['SubSection']))
                     child_raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend', 'cpm',
                                      'video_3s_views', 'video_thruplay', 'lp_views', 'view_content',
                                      'adds_to_cart', 'checkouts', 'purchases', 'revenue']
@@ -915,19 +952,43 @@ def generate_pdf_report(product_name, df, metrics, mode,
 
                 # Ads summary
                 if ad_data is not None and len(ad_data) > 0 and calculate_metrics:
-                    story.append(Paragraph("Ad-level Performance Summary", styles['SectionHead']))
+                    story.append(Paragraph("All Ads Performance Summary", styles['SectionHead']))
                     unique_ads = ad_data['product'].unique()
-                    story.append(Paragraph(f"{len(unique_ads)} active ad(s) found", styles['SmallGray']))
+
+                    # Count active vs paused
+                    ad_has_status = 'entity_status' in ad_data.columns
+                    if ad_has_status:
+                        ad_status_counts = ad_data.groupby('product')['entity_status'].first()
+                        ad_n_active = (ad_status_counts == 'ACTIVE').sum()
+                        ad_n_paused = (ad_status_counts == 'PAUSED').sum()
+                        ad_status_note = f"{len(unique_ads)} ad(s) with data"
+                        if ad_n_active > 0:
+                            ad_status_note += f" — {ad_n_active} active"
+                        if ad_n_paused > 0:
+                            ad_status_note += f", {ad_n_paused} paused"
+                    else:
+                        ad_status_note = f"{len(unique_ads)} ad(s) with data"
+
+                    story.append(Paragraph(ad_status_note, styles['SmallGray']))
                     story.append(Spacer(1, 0.1 * inch))
 
-                    ad_summary = [['Ad Name', 'Spend', 'Revenue', 'ROAS', 'ACoS', 'AOV', 'CPA', 'CTR%', 'Hook%', 'CVR%', 'Cost/ATC', 'Rating']]
+                    ad_summary = [['Status', 'Ad Name', 'Spend', 'Revenue', 'ROAS', 'ACoS', 'AOV', 'CPA', 'CTR%', 'Hook%', 'CVR%', 'Cost/ATC', 'Rating']]
                     for adname in unique_ads[:20]:
                         addf = ad_data[ad_data['product'] == adname]
                         adm = calculate_metrics(addf)
                         roas_val = adm.get('ROAS', 0)
                         rating = 'Strong' if roas_val >= 3 else 'OK' if roas_val >= 2 else 'Weak'
+
+                        # Get status for this ad
+                        if ad_has_status:
+                            ad_st = addf['entity_status'].iloc[0] if len(addf) > 0 else 'UNKNOWN'
+                        else:
+                            ad_st = 'UNKNOWN'
+                        ad_status_label = 'ACTIVE' if ad_st == 'ACTIVE' else 'PAUSED' if ad_st == 'PAUSED' else ad_st
+
                         ad_summary.append([
-                            str(adname)[:22],
+                            ad_status_label,
+                            str(adname)[:20],
                             f"₹{adm['totals']['spend']:,.0f}",
                             f"₹{adm['totals']['revenue']:,.0f}",
                             f"{roas_val:.2f}x",
@@ -942,23 +1003,33 @@ def generate_pdf_report(product_name, df, metrics, mode,
                         ])
 
                     ad_tbl = Table(ad_summary, colWidths=[
-                        1.5*inch, 0.7*inch, 0.7*inch, 0.6*inch, 0.55*inch, 0.55*inch,
-                        0.6*inch, 0.5*inch, 0.5*inch, 0.5*inch, 0.6*inch, 0.55*inch
+                        0.55*inch, 1.3*inch, 0.6*inch, 0.6*inch, 0.5*inch, 0.5*inch, 0.5*inch,
+                        0.55*inch, 0.45*inch, 0.45*inch, 0.45*inch, 0.55*inch, 0.5*inch
                     ])
                     ad_s = [
                         ('BACKGROUND', (0, 0), (-1, 0), C.PINK),
                         ('TEXTCOLOR', (0, 0), (-1, 0), C.WHITE),
                         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ('FONTSIZE', (0, 0), (-1, 0), 8),
+                        ('FONTSIZE', (0, 0), (-1, 0), 7),
                         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                        ('FONTSIZE', (0, 1), (-1, -1), 7.5),
+                        ('FONTSIZE', (0, 1), (-1, -1), 7),
                         ('GRID', (0, 0), (-1, -1), 0.4, C.BORDER),
                         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [C.WHITE, C.PINK_BG]),
-                        ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
-                        ('TOPPADDING', (0, 0), (-1, -1), 5),
-                        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('ALIGN', (1, 1), (1, -1), 'LEFT'),
+                        ('TOPPADDING', (0, 0), (-1, -1), 4),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                     ]
                     for ri in range(1, len(ad_summary)):
+                        # Status column color
+                        st_val = ad_summary[ri][0]
+                        if st_val == 'ACTIVE':
+                            ad_s.append(('BACKGROUND', (0, ri), (0, ri), C.SUCCESS_BG))
+                            ad_s.append(('TEXTCOLOR', (0, ri), (0, ri), C.SUCCESS))
+                        elif st_val == 'PAUSED':
+                            ad_s.append(('BACKGROUND', (0, ri), (0, ri), C.WARNING_BG))
+                            ad_s.append(('TEXTCOLOR', (0, ri), (0, ri), C.WARNING))
+                        # Rating column color
                         r = ad_summary[ri][-1]
                         if r == 'Strong':
                             ad_s.append(('BACKGROUND', (-1, ri), (-1, ri), C.SUCCESS_BG))
@@ -971,7 +1042,7 @@ def generate_pdf_report(product_name, df, metrics, mode,
                     story.append(Spacer(1, 0.15 * inch))
 
                     # Ad Raw Data table
-                    story.append(Paragraph("Raw Data — All Active Ads", styles['SubSection']))
+                    story.append(Paragraph("Raw Data — All Ads", styles['SubSection']))
                     ad_raw_cols = ['date', 'product', 'impressions', 'clicks', 'outbound_clicks', 'spend', 'cpm',
                                   'video_3s_views', 'video_thruplay', 'lp_views', 'view_content',
                                   'adds_to_cart', 'checkouts', 'purchases', 'revenue']

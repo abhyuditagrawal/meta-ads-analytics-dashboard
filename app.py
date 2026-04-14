@@ -765,16 +765,18 @@ def get_recommendations(metrics: Dict) -> List[Dict]:
 
 
 def fetch_all_child_data(ad_account_id, selected_campaign_ids, date_preset, start_date, end_date) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Fetch data for all active ad sets and ads under selected campaigns"""
+    """Fetch data for ALL ad sets and ads under selected campaigns (including paused/archived — they have historical data)"""
 
     adsets, error = get_adsets(ad_account_id, selected_campaign_ids)
-    active_adsets = [a for a in adsets if a['status'] == 'ACTIVE'] if adsets else []
+    all_adsets = adsets if adsets else []
 
     adset_data = None
     ad_data = None
 
-    if active_adsets:
-        adset_ids = [a['id'] for a in active_adsets]
+    if all_adsets:
+        # Build name → status mapping for ad sets
+        adset_status_map = {a['name']: a['status'] for a in all_adsets}
+        adset_ids = [a['id'] for a in all_adsets]
 
         adset_data, _ = fetch_data(
             ad_account_id,
@@ -785,11 +787,17 @@ def fetch_all_child_data(ad_account_id, selected_campaign_ids, date_preset, star
             end_date=end_date
         )
 
-        ads, error = get_ads(ad_account_id, adset_ids)
-        active_ads = [a for a in ads if a['status'] == 'ACTIVE'] if ads else []
+        # Inject status column into adset_data
+        if adset_data is not None and len(adset_data) > 0:
+            adset_data['entity_status'] = adset_data['product'].map(adset_status_map).fillna('UNKNOWN')
 
-        if active_ads:
-            ad_ids = [a['id'] for a in active_ads]
+        ads, error = get_ads(ad_account_id, adset_ids)
+        all_ads = ads if ads else []
+
+        if all_ads:
+            # Build name → status mapping for ads
+            ad_status_map = {a['name']: a['status'] for a in all_ads}
+            ad_ids = [a['id'] for a in all_ads]
 
             ad_data, _ = fetch_data(
                 ad_account_id,
@@ -799,6 +807,10 @@ def fetch_all_child_data(ad_account_id, selected_campaign_ids, date_preset, star
                 start_date=start_date,
                 end_date=end_date
             )
+
+            # Inject status column into ad_data
+            if ad_data is not None and len(ad_data) > 0:
+                ad_data['entity_status'] = ad_data['product'].map(ad_status_map).fillna('UNKNOWN')
 
     return adset_data, ad_data
 
