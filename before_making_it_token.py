@@ -823,95 +823,41 @@ st.markdown("**Real-time data from Meta Ads Manager API with Advanced Analytics*
 # Sidebar - API Configuration
 st.sidebar.header("🔑 API Configuration")
 
-# Hardcoded credentials (app-level)
+with st.sidebar.expander("📝 Setup Instructions", expanded=not st.session_state.api_initialized):
+    st.markdown("""
+    **Enter your Meta API credentials:**
+
+    1. **App ID** - From your Meta App settings
+    2. **App Secret** - From your Meta App settings
+    3. **Access Token** - From Graph API Explorer
+    4. **Ad Account ID** - From Ads Manager (with 'act_' prefix)
+
+    These are saved in your browser session only.
+    """)
+
+access_token = st.sidebar.text_input("Access Token", type="password", key="input_access_token")
+
+# Hardcoded credentials
 app_id = "1196805395915193"
 app_secret = "7aa8c5a3254f8abcdb657e54642dd92b"
 ad_account_id = "act_24472841068985090"
 
-# Try to load System User token from Streamlit secrets first
-# Set this in Streamlit Cloud: Settings → Secrets → paste:
-#   META_ACCESS_TOKEN = "your_system_user_token_here"
-token_from_secrets = None
-try:
-    token_from_secrets = st.secrets.get("META_ACCESS_TOKEN", None)
-except Exception:
-    token_from_secrets = None
-
-# Auto-connect on page load if we have a secret token and haven't connected yet
-if token_from_secrets and not st.session_state.api_initialized:
-    success, message = initialize_api(app_id, app_secret, token_from_secrets)
-    if success:
-        st.session_state.api_initialized = True
-        st.session_state.saved_app_id = app_id
-        st.session_state.saved_app_secret = app_secret
-        st.session_state.saved_access_token = token_from_secrets
-        st.session_state.saved_ad_account_id = ad_account_id
-        st.session_state.auto_connected = True
-
-with st.sidebar.expander("📝 Setup Instructions", expanded=not st.session_state.api_initialized):
-    if token_from_secrets:
-        st.markdown("""
-        ✅ **System User token loaded from secrets**
-
-        Connected automatically. No manual token entry needed.
-
-        To rotate the token, update `META_ACCESS_TOKEN` in
-        Streamlit Cloud → Settings → Secrets.
-        """)
+if st.sidebar.button("🔌 Connect to Meta API", type="primary"):
+    if all([app_id, app_secret, access_token, ad_account_id]):
+        with st.spinner("Connecting to Meta API..."):
+            success, message = initialize_api(app_id, app_secret, access_token)
+            if success:
+                st.session_state.api_initialized = True
+                st.session_state.saved_app_id = app_id
+                st.session_state.saved_app_secret = app_secret
+                st.session_state.saved_access_token = access_token
+                st.session_state.saved_ad_account_id = ad_account_id
+                st.sidebar.success("✅ Connected successfully!")
+                st.rerun()
+            else:
+                st.sidebar.error(f"❌ {message}")
     else:
-        st.markdown("""
-        **For permanent access (recommended):**
-
-        Use a **System User Access Token** — it doesn't expire.
-
-        1. Go to Business Settings → Users → System Users
-        2. Create a system user, assign Ad Account access
-        3. Generate a token with `ads_read`, `ads_management`, `business_management` permissions
-        4. Add it to Streamlit Cloud:
-           **Settings → Secrets → add**
-           `META_ACCESS_TOKEN = "your_token_here"`
-        5. Redeploy — auto-connects from then on
-
-        **OR paste a short-lived token below** (expires in ~1 hour):
-        """)
-
-# Show manual entry only if secrets aren't configured
-if not token_from_secrets:
-    access_token = st.sidebar.text_input("Access Token", type="password", key="input_access_token")
-
-    if st.sidebar.button("🔌 Connect to Meta API", type="primary"):
-        if all([app_id, app_secret, access_token, ad_account_id]):
-            with st.spinner("Connecting to Meta API..."):
-                success, message = initialize_api(app_id, app_secret, access_token)
-                if success:
-                    st.session_state.api_initialized = True
-                    st.session_state.saved_app_id = app_id
-                    st.session_state.saved_app_secret = app_secret
-                    st.session_state.saved_access_token = access_token
-                    st.session_state.saved_ad_account_id = ad_account_id
-                    st.sidebar.success("✅ Connected successfully!")
-                    st.rerun()
-                else:
-                    st.sidebar.error(f"❌ {message}")
-        else:
-            st.sidebar.warning("⚠️ Please fill in all credentials")
-else:
-    # Token from secrets — show connection status
-    if st.session_state.api_initialized:
-        st.sidebar.success("✅ Connected via System User token")
-    else:
-        st.sidebar.error("❌ Could not connect with token from secrets. Check that it's valid.")
-
-    # Allow manual disconnect/reconnect
-    if st.sidebar.button("🔄 Reconnect"):
-        success, message = initialize_api(app_id, app_secret, token_from_secrets)
-        if success:
-            st.session_state.api_initialized = True
-            st.session_state.saved_access_token = token_from_secrets
-            st.sidebar.success("✅ Reconnected!")
-            st.rerun()
-        else:
-            st.sidebar.error(f"❌ {message}")
+        st.sidebar.warning("⚠️ Please fill in all credentials")
 
 # Main content
 if not st.session_state.api_initialized:
