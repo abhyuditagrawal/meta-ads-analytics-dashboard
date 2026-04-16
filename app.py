@@ -21,6 +21,48 @@ st.set_page_config(
     layout="wide"
 )
 
+# ==================== PASSWORD GATE ====================
+def check_password():
+    """Returns True if the user has entered the correct password."""
+
+    # Read expected password from secrets
+    try:
+        expected_password = st.secrets.get("APP_PASSWORD", None)
+    except Exception:
+        expected_password = None
+
+    # If no password set in secrets, skip the gate entirely (dev mode)
+    if not expected_password:
+        return True
+
+    # Already logged in this session
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show login form
+    st.markdown("<h1 style='text-align: center; margin-top: 80px;'>🔐 Meta Ads Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #6b7280;'>Please log in to continue</p>", unsafe_allow_html=True)
+
+    # Center the login form
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        with st.form("login_form", clear_on_submit=False):
+            password = st.text_input("Password", type="password", key="password_input")
+            submitted = st.form_submit_button("Log In", type="primary", use_container_width=True)
+
+            if submitted:
+                if password == expected_password:
+                    st.session_state["password_correct"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Incorrect password")
+
+    return False
+
+
+if not check_password():
+    st.stop()  # Halts execution — nothing below runs until logged in
+
 # ==================== UPDATED BENCHMARKS ====================
 # Based on D2C India / children's products benchmarks
 BENCHMARKS = {
@@ -822,6 +864,16 @@ st.markdown("**Real-time data from Meta Ads Manager API with Advanced Analytics*
 
 # Sidebar - API Configuration
 st.sidebar.header("🔑 API Configuration")
+
+# Logout button (only show if password protection is active)
+try:
+    if st.secrets.get("APP_PASSWORD", None) and st.session_state.get("password_correct", False):
+        if st.sidebar.button("🚪 Log Out", use_container_width=True):
+            st.session_state["password_correct"] = False
+            st.rerun()
+        st.sidebar.markdown("---")
+except Exception:
+    pass
 
 # Hardcoded credentials (app-level)
 app_id = "1196805395915193"
