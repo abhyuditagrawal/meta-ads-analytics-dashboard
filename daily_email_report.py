@@ -215,59 +215,37 @@ def get_recommendations(metrics):
 def fetch_campaign_data(ad_account_id, campaign_ids, report_date):
     """Fetch one day of data for given campaigns."""
 
-    ad_account = AdAccount(ad_account_id)
+    def parse_insight(insight):
+        """Parse a single insight row (works for both SDK objects and dicts)."""
+        get = insight.get if isinstance(insight, dict) else lambda k, d=None: insight.get(k, d)
 
-    fields = [
-        'campaign_id', 'campaign_name', 'date_start',
-        'impressions', 'clicks', 'spend', 'reach', 'frequency',
-        'cpc', 'cpm', 'ctr', 'outbound_clicks', 'actions',
-        'action_values', 'video_thruplay_watched_actions',
-    ]
-
-    params = {
-        'level': 'campaign',
-        'time_increment': 1,
-        'filtering': [{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}],
-        'time_range': {
-            'since': report_date.strftime('%Y-%m-%d'),
-            'until': report_date.strftime('%Y-%m-%d'),
-        }
-    }
-
-    insights = ad_account.get_insights(fields=fields, params=params)
-
-    data_list = []
-    for insight in insights:
         row = {
-            'date': pd.to_datetime(insight.get('date_start')),
-            'campaign_name': insight.get('campaign_name', 'Unknown'),
-            'impressions': int(insight.get('impressions', 0)),
-            'clicks': int(insight.get('clicks', 0)),
-            'spend': float(insight.get('spend', 0)),
-            'reach': int(insight.get('reach', 0)),
-            'frequency': float(insight.get('frequency', 0)),
-            'cpc': float(insight.get('cpc', 0)),
-            'cpm': float(insight.get('cpm', 0)),
-            'ctr': float(insight.get('ctr', 0)),
+            'date': pd.to_datetime(get('date_start')),
+            'campaign_name': get('campaign_name', 'Unknown'),
+            'impressions': int(get('impressions', 0)),
+            'clicks': int(get('clicks', 0)),
+            'spend': float(get('spend', 0)),
+            'reach': int(get('reach', 0)),
+            'frequency': float(get('frequency', 0)),
+            'cpc': float(get('cpc', 0) or 0),
+            'cpm': float(get('cpm', 0) or 0),
+            'ctr': float(get('ctr', 0) or 0),
             'lp_views': 0, 'view_content': 0, 'adds_to_cart': 0,
             'checkouts': 0, 'purchases': 0, 'revenue': 0,
             'outbound_clicks': 0, 'video_3s_views': 0, 'video_thruplay': 0,
-            'entity_name': insight.get('campaign_name'),
+            'entity_name': get('campaign_name'),
         }
 
-        # Outbound clicks
-        for oc in (insight.get('outbound_clicks') or []):
+        for oc in (get('outbound_clicks') or []):
             if oc.get('action_type') == 'outbound_click':
                 row['outbound_clicks'] = int(oc.get('value', 0))
                 break
 
-        # ThruPlay
-        for vt in (insight.get('video_thruplay_watched_actions') or []):
+        for vt in (get('video_thruplay_watched_actions') or []):
             row['video_thruplay'] = int(vt.get('value', 0))
             break
 
-        # Actions
-        for action in (insight.get('actions') or []):
+        for action in (get('actions') or []):
             at = action.get('action_type', '')
             if not at:
                 continue
@@ -285,9 +263,8 @@ def fetch_campaign_data(ad_account_id, campaign_ids, report_date):
             elif at == 'video_view':
                 row['video_3s_views'] = val
 
-        # Revenue
         revenue_found = False
-        for av in (insight.get('action_values') or []):
+        for av in (get('action_values') or []):
             at = av.get('action_type', '')
             if not at:
                 continue
@@ -298,7 +275,62 @@ def fetch_campaign_data(ad_account_id, campaign_ids, report_date):
         if not revenue_found and row['purchases'] > 0:
             row['revenue'] = row['purchases'] * DEFAULT_AOV
 
-        data_list.append(row)
+        return row
+
+    # Try SDK first
+    try:
+        ad_account = AdAccount(ad_account_id)
+
+        fields = [
+            'campaign_id', 'campaign_name', 'date_start',
+            'impressions', 'clicks', 'spend', 'reach', 'frequency',
+            'cpc', 'cpm', 'ctr', 'outbound_clicks', 'actions',
+            'action_values', 'video_thruplay_watched_actions',
+        ]
+
+        params = {
+            'level': 'campaign',
+            'time_increment': 1,
+            'filtering': [{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}],
+            'time_range': {
+                'since': report_date.strftime('%Y-%m-%d'),
+                'until': report_date.strftime('%Y-%m-%d'),
+            }
+        }
+
+        insights = ad_account.get_insights(fields=fields, params=params)
+        data_list = [parse_insight(i) for i in insights]
+
+    except Exception as sdk_err:
+        log.warning(f"SDK insights call failed: {sdk_err}")
+        log.info("Trying direct API call as fallback...")
+
+        import requests
+        import json
+
+        url = f"https://graph.facebook.com/v21.0/{ad_account_id}/insights"
+        params = {
+            'fields': ','.join([
+                'campaign_id', 'campaign_name', 'date_start',
+                'impressions', 'clicks', 'spend', 'reach', 'frequency',
+                'cpc', 'cpm', 'ctr', 'outbound_clicks', 'actions',
+                'action_values', 'video_thruplay_watched_actions',
+            ]),
+            'level': 'campaign',
+            'time_increment': 1,
+            'filtering': json.dumps([{'field': 'campaign.id', 'operator': 'IN', 'value': campaign_ids}]),
+            'time_range': json.dumps({
+                'since': report_date.strftime('%Y-%m-%d'),
+                'until': report_date.strftime('%Y-%m-%d'),
+            }),
+            'access_token': CONFIG['META_ACCESS_TOKEN'],
+            'limit': 500,
+        }
+
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        data_list = [parse_insight(i) for i in data.get('data', [])]
 
     if data_list:
         df = pd.DataFrame(data_list)
@@ -309,11 +341,31 @@ def fetch_campaign_data(ad_account_id, campaign_ids, report_date):
 
 def get_active_campaigns(ad_account_id):
     """Get all ACTIVE campaign IDs."""
-    ad_account = AdAccount(ad_account_id)
-    campaigns = ad_account.get_campaigns(
-        fields=['name', 'id', 'status', 'objective']
-    )
-    return [{'id': c['id'], 'name': c['name']} for c in campaigns if c.get('status') == 'ACTIVE']
+    # Try SDK first, fall back to direct API call if SDK has JSON parsing issues
+    try:
+        ad_account = AdAccount(ad_account_id)
+        campaigns = ad_account.get_campaigns(
+            fields=['name', 'id', 'status', 'objective']
+        )
+        return [{'id': c['id'], 'name': c['name']} for c in campaigns if c.get('status') == 'ACTIVE']
+    except Exception as sdk_err:
+        log.warning(f"SDK call failed: {sdk_err}")
+        log.info("Trying direct API call as fallback...")
+
+        # Direct API call using requests
+        import requests
+        url = f"https://graph.facebook.com/v21.0/{ad_account_id}/campaigns"
+        params = {
+            'fields': 'name,id,status,objective',
+            'access_token': CONFIG['META_ACCESS_TOKEN'],
+            'limit': 500,
+        }
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+
+        campaigns = data.get('data', [])
+        return [{'id': c['id'], 'name': c['name']} for c in campaigns if c.get('status') == 'ACTIVE']
 
 
 # ─────────────────────────────────────────────────────────
