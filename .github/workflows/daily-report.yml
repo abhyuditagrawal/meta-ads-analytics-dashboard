@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pandas facebook-business==22.0.1 reportlab requests
+        run: pip install pandas reportlab requests
 
       - name: Send daily report
         env:
