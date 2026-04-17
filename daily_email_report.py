@@ -311,10 +311,9 @@ def get_active_campaigns(ad_account_id):
     """Get all ACTIVE campaign IDs."""
     ad_account = AdAccount(ad_account_id)
     campaigns = ad_account.get_campaigns(
-        fields=['name', 'id', 'status'],
-        params={'filtering': [{'field': 'status', 'operator': 'IN', 'value': ['ACTIVE']}]}
+        fields=['name', 'id', 'status', 'objective']
     )
-    return [{'id': c['id'], 'name': c['name']} for c in campaigns]
+    return [{'id': c['id'], 'name': c['name']} for c in campaigns if c.get('status') == 'ACTIVE']
 
 
 # ─────────────────────────────────────────────────────────
