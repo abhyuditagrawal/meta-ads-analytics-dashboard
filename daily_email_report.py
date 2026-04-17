@@ -317,6 +317,55 @@ def get_recommendations(metrics):
 # ═══════════════════════════════════════════════════════════
 # 4. EMAIL
 # ═══════════════════════════════════════════════════════════
+def send_simple_email(subject, html_body):
+    """Send an email without any attachment."""
+    msg = MIMEMultipart('mixed')
+    msg['From'] = EMAIL_FROM
+    msg['To'] = EMAIL_TO
+    msg['Subject'] = subject
+    msg.attach(MIMEText(html_body, 'html'))
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+        s.starttls()
+        s.login(SMTP_USER, SMTP_PASSWORD)
+        s.send_message(msg)
+    log.info(f'Email sent to {EMAIL_TO}')
+
+
+def send_no_activity_email(report_date, reason, campaign_names=None):
+    """Short email when there's no data to report — just so you know the system is alive."""
+    subject = f'📊 Meta Ads — {report_date.strftime("%b %d")} | No activity'
+
+    campaigns_html = ''
+    if campaign_names:
+        clist = ', '.join(campaign_names[:5])
+        if len(campaign_names) > 5:
+            clist += f' +{len(campaign_names) - 5} more'
+        campaigns_html = f'<p style="color:#64748b;font-size:13px;margin:10px 0 0 0">Active campaigns: {clist}</p>'
+
+    html = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #6b7280; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+        <h2 style="margin: 0;">📊 Daily Meta Ads Report</h2>
+        <p style="margin: 5px 0 0 0; opacity: 0.9;">{report_date.strftime('%A, %B %d, %Y')}</p>
+      </div>
+      <div style="background: #f8fafc; padding: 20px; border: 1px solid #e2e8f0; border-radius: 0 0 8px 8px;">
+        <p style="margin: 0; font-size: 14px; color: #374151;">
+          <strong>No report generated for yesterday.</strong>
+        </p>
+        <p style="margin: 10px 0 0 0; font-size: 13px; color: #64748b;">
+          Reason: {reason}
+        </p>
+        {campaigns_html}
+        <p style="margin: 20px 0 0 0; font-size: 12px; color: #94a3b8;">
+          This is an automated heads-up so you know the daily report script ran successfully. No PDF attached since there's nothing to report on.
+        </p>
+      </div>
+    </div>
+    """
+    send_simple_email(subject, html)
+
+
 def send_email(subject, html_body, pdf_bytes, pdf_filename):
     msg = MIMEMultipart('mixed')
     msg['From'] = EMAIL_FROM
@@ -410,7 +459,8 @@ def main():
     log.info('Fetching active campaigns...')
     campaigns = get_active_campaigns()
     if not campaigns:
-        log.warning('No active campaigns. Nothing to report.')
+        log.warning('No active campaigns. Sending heads-up email.')
+        send_no_activity_email(report_date, reason='No active campaigns were running.')
         return
     campaign_ids = [c['id'] for c in campaigns]
     campaign_names = [c['name'] for c in campaigns]
@@ -420,7 +470,12 @@ def main():
     log.info(f'Fetching insights for {report_date}...')
     df = fetch_insights(campaign_ids, report_date, report_date)
     if df is None or len(df) == 0:
-        log.warning('No data for yesterday — campaigns may not have spent. Exiting.')
+        log.warning('No spend data for yesterday. Sending heads-up email.')
+        send_no_activity_email(
+            report_date,
+            reason='Active campaigns exist, but none spent yesterday.',
+            campaign_names=campaign_names,
+        )
         return
     log.info(f'Got {len(df)} row(s) of data')
 
