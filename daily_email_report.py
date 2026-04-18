@@ -15,7 +15,7 @@ import smtplib
 import logging
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -451,9 +451,26 @@ def main():
         log.error(f'Missing required env vars: {", ".join(missing)}')
         sys.exit(1)
 
-    # Report for yesterday
-    report_date = (datetime.now() - timedelta(days=1)).date()
-    log.info(f'Report date: {report_date}')
+    # Report for yesterday — in IST (India Standard Time, UTC+5:30)
+    # This matters because GitHub runners are in UTC. When it runs at, say,
+    # 19:30 UTC on April 17, that's 01:00 IST on April 18, so "yesterday" in
+    # India is April 17 — not April 16 (which is what UTC would give us).
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(IST)
+
+    # Safety: this script is designed to run AFTER midnight IST so "yesterday"
+    # means the full day that just completed. If it runs before midnight IST
+    # (hour 0-23 of the same day being reported), the math would give the wrong day.
+    # Warn loudly — the cron is configured to avoid this, but just in case.
+    if now_ist.hour >= 20:  # 8 PM IST or later but before midnight
+        log.warning(
+            f'Script ran at {now_ist.strftime("%H:%M IST")} which is BEFORE midnight. '
+            f'The cron schedule should run it after midnight IST. Check .github/workflows/daily-report.yml'
+        )
+
+    report_date = (now_ist - timedelta(days=1)).date()
+    log.info(f'Current time (IST): {now_ist.strftime("%Y-%m-%d %H:%M")}')
+    log.info(f'Report date (yesterday in IST): {report_date}')
 
     # Get active campaigns
     log.info('Fetching active campaigns...')

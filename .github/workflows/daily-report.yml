@@ -2,8 +2,12 @@ name: Daily Meta Ads Report
 
 on:
   schedule:
-    # Runs at 12:00 AM IST (India) = 18:30 UTC the previous day
-    - cron: '30 18 * * *'
+    # Target: 12:30 AM IST = 19:00 UTC previous day.
+    # We intentionally run AFTER midnight IST so "yesterday" calculation is
+    # always correct (e.g. script runs at 12:30 AM on Apr 20 IST → yesterday = Apr 19).
+    # GitHub Actions usually delays 15-60 min, so actual run lands ~12:45 AM - 1:45 AM IST.
+    # A slight delay past 1 AM is fine; running BEFORE midnight would give wrong date.
+    - cron: '0 19 * * *'
   workflow_dispatch:  # Lets you trigger manually from the Actions tab
 
 jobs:
